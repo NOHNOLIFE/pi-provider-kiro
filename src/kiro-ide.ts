@@ -71,6 +71,7 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
       clientSecret,
       region,
       authMethod: "idc",
+      credentialSource: "ide",
     };
   } catch {
     return undefined;

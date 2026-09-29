@@ -8,7 +8,6 @@ import { formatSafeError } from "./debug.js";
 import { getKiroEndpoints, resolveApiRegion } from "./endpoints.js";
 import { loadKiroFooterConfig } from "./footer.js";
 import { registerKiroUsageFooter } from "./footer-lifecycle.js";
-import { getKiroCliCredentials, getKiroCliSocialToken } from "./kiro-cli.js";
 import { getKiroIdeCredentials } from "./kiro-ide.js";
 import { setExtensionContext } from "./login-ui.js";
 import { getCachedModels, isCacheStale, type KiroModel, kiroModels, updateKiroModelsCache } from "./models.js";
@@ -79,7 +78,7 @@ function resolveLocalCredential(): KiroRefreshCredential {
   const apiKey = process.env.KIRO_API_KEY;
   if (apiKey) return { type: "api_key", key: apiKey };
   try {
-    return getKiroCliSocialToken() ?? getKiroCliCredentials() ?? getKiroIdeCredentials() ?? undefined;
+    return getPiHostKiroCredentials() ?? getKiroIdeCredentials() ?? undefined;
   } catch (error) {
     console.warn(`[pi-provider-kiro] Failed to read local Kiro credentials: ${formatSafeError(error)}`);
     return undefined;
@@ -92,7 +91,7 @@ function resolveLocalCredential(): KiroRefreshCredential {
  * (which has no profile ARN to query) yields undefined and the footer stays hidden.
  *
  * Prefers pi's own persisted credential (~/.pi/agent/auth.json) since that is the
- * one pi hands the provider at runtime; a kiro-cli/IDE credential may not exist.
+ * one pi hands the provider at runtime; falls back to the Kiro IDE cache.
  */
 function resolveOAuthCredential(): OAuthCredentials | undefined {
   const hostCredential = getPiHostKiroCredentials();
@@ -199,7 +198,6 @@ export default function (pi: ExtensionAPI) {
       login: loginKiro,
       refreshToken: refreshKiroToken,
       getApiKey: (cred: OAuthCredentials) => cred.access,
-      getCliCredentials: getKiroCliCredentials,
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);
@@ -215,8 +213,7 @@ export default function (pi: ExtensionAPI) {
         return [...nonKiro, ...modifiedKiro];
       },
       fetchUsage: fetchKiroUsage,
-      // biome-ignore lint/suspicious/noExplicitAny: ProviderConfig.oauth doesn't include getCliCredentials but OAuthProviderInterface does
-    } as any,
+    },
     streamSimple,
   });
 
