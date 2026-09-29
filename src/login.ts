@@ -13,11 +13,9 @@
 // common AWS OIDC endpoints. Inference/API region is derived from SSO
 // region automatically via resolveApiRegion() in models.ts.
 
-import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import http from "node:http";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-import { formatSafeError } from "./debug.js";
 import { hasExtensionContext, showLoginUI, showWaitingUI } from "./login-ui.js";
 import {
   BUILDER_ID_PROFILE_ARN,
@@ -104,9 +102,9 @@ export async function interactiveLogin(
           case "builder-id":
             return runDeviceCodeFlow(mergedCallbacks, BUILDER_ID_START_URL, "us-east-1");
           case "google":
-            return loginViaKiroCli(mergedCallbacks, "google");
+            return runSocialLoginFlow(mergedCallbacks, "google");
           case "github":
-            return loginViaKiroCli(mergedCallbacks, "github");
+            return runSocialLoginFlow(mergedCallbacks, "github");
           case "personal":
             return runSocialLoginFlow(mergedCallbacks);
           case "idc":
@@ -295,6 +293,7 @@ async function pollDeviceCode(
             clientSecret,
             region,
             authMethod: "idc" as KiroAuthMethod,
+            credentialSource: "direct",
             startUrl,
             ...(startUrl === BUILDER_ID_START_URL ? { profileArn: BUILDER_ID_PROFILE_ARN } : {}),
           } satisfies KiroCredentials;
@@ -479,15 +478,9 @@ export async function runSocialLoginFlow(
           clientSecret: "",
           region,
           authMethod: "desktop" as const,
+          credentialSource: "direct" as const,
           profileArn: data.profileArn,
         };
-
-        try {
-          const { saveKiroCliCredentials } = await import("./kiro-cli.js");
-          saveKiroCliCredentials(creds);
-        } catch {
-          // Ignore write errors
-        }
 
         getProgress(callbacks)?.("Google/GitHub login successful");
         resolve(creds);
@@ -512,32 +505,4 @@ export async function runSocialLoginFlow(
       });
     });
   });
-}
-
-/**
- * Delegate Google/GitHub social login to kiro-cli.
- * Requires kiro-cli to be installed and in PATH.
- */
-export async function loginViaKiroCli(
-  callbacks: OAuthLoginCallbacks,
-  provider: "google" | "github",
-): Promise<OAuthCredentials> {
-  const { getKiroCliCredentials, getKiroCliSocialToken } = await import("./kiro-cli.js");
-
-  getProgress(callbacks)?.(`Initiating ${provider} login via kiro-cli...`);
-
-  try {
-    execFileSync("kiro-cli", ["login", "--license", "free"], {
-      timeout: 120000,
-      stdio: "inherit",
-    });
-  } catch (error) {
-    throw new Error(`kiro-cli login failed: ${formatSafeError(error)}. Ensure kiro-cli is installed and in PATH.`);
-  }
-
-  const creds = getKiroCliSocialToken() || getKiroCliCredentials();
-  if (!creds) throw new Error("kiro-cli login completed but no credentials found in its database");
-
-  getProgress(callbacks)?.(creds.authMethod === "desktop" ? "Google/GitHub login successful" : "Login successful");
-  return creds;
 }
