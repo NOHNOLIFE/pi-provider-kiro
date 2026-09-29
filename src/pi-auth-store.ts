@@ -31,7 +31,8 @@ function readPiHostKiroCredentials(agentDir: string, allowExpired: boolean): Kir
     if (Date.now() >= kiro.expires - EXPIRY_BUFFER_MS) return undefined;
   }
 
-  return { ...(kiro as unknown as KiroCredentials), credentialSource: "pi" };
+  const stored = kiro as unknown as KiroCredentials;
+  return { ...stored, credentialSource: stored.credentialSource ?? "pi" };
 }
 
 export function getPiHostKiroCredentials(agentDir = getPiAgentDir()): KiroCredentials | undefined {
