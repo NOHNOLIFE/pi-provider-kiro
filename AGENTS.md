@@ -103,7 +103,6 @@ npm run test:watch # vitest (watch mode)
 ## Common Gotchas
 
 - `ZERO_COST` is a frozen shared object — don't try to mutate model costs
-- The `as any` cast in `index.ts` is intentional — `ProviderConfig.oauth` doesn't type `getCliCredentials`
 - Output token count is estimated (`content.length / 4`), not from the API
 - `contextUsagePercentage` is the only usage metric Kiro provides; input tokens are back-calculated
 - Social login (Google/GitHub) is handled directly by the provider; no `kiro-cli` installation is required
