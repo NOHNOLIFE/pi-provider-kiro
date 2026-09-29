@@ -1,6 +1,6 @@
 // Feature 10: Interactive Login — device code flow fallback
 //
-// Reached when no existing credentials are found (no Kiro IDE, no kiro-cli).
+// Reached when no existing Pi or Kiro IDE credentials are found.
 // Matches the four options shown on app.kiro.dev/signin:
 //   Builder ID, Your organization (IAM IdC), Google, GitHub
 //
