@@ -7,7 +7,7 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 Kiro gives you a strong free model menu, but pi needs a provider that speaks Kiro's auth, model catalog, and streaming protocol cleanly. `pi-provider-kiro` handles that bridge, including:
 
 - AWS Builder ID, IAM Identity Center, Google, GitHub, and enterprise external IdP (OIDC) login flows
-- shared credentials from an existing `kiro-cli` session when available
+- native credential reuse from Pi's auth store or the Kiro IDE cache
 - reasoning-aware streaming
 - region-aware model filtering so pi only shows models your Kiro region can actually use
 
@@ -34,13 +34,10 @@ Then log in from pi:
 The login flow supports:
 - **AWS Builder ID** — native device-code flow, works well over SSH/remotes
 - **Your organization** — IAM Identity Center start URL
-- **Google** — social login via `kiro-cli`
-- **GitHub** — social login via `kiro-cli`
+- **Google** — native browser PKCE login
+- **GitHub** — native browser PKCE login
 
-If your organization uses an external identity provider (e.g. Okta) through Kiro, log in once with
-`kiro-cli login` and the provider reuses that session — no separate pi login needed.
-
-If you already use [kiro-cli](https://kiro.dev), the provider can reuse those credentials instead of forcing a second login.
+The provider does not require `kiro-cli`. Pi persists the credentials it obtains from `/login kiro` and refreshes them directly. It can also reuse credentials written by the Kiro IDE when that is the selected cached-login source.
 
 ## Models
 
@@ -116,7 +113,7 @@ The badge shows the percent of your allowance **used** (e.g. `◆ Kiro 1%`), col
 Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.
 
 This provider only keeps local recovery for Kiro-specific cases:
-- `403` auth races, where it can refresh credentials from `kiro-cli`
+- `403` auth races, where it asks Pi's credential owner to refresh and retries with the persisted token
 - first-token / stalled-stream recovery
 - empty-stream retries
 - non-retryable Kiro body markers like `MONTHLY_REQUEST_COUNT` and `INSUFFICIENT_MODEL_CAPACITY`
@@ -167,7 +164,8 @@ src/
 ├── index.ts            # Extension registration
 ├── models.ts           # 12 model definitions + ID resolution
 ├── oauth.ts            # Multi-provider auth (Builder ID / Google / GitHub)
-├── kiro-cli.ts         # kiro-cli credential sharing
+├── kiro-ide.ts         # optional Kiro IDE credential reuse
+├── pi-auth-store.ts    # Pi-owned credential reuse
 ├── transform.ts        # Message format conversion
 ├── history.ts          # Conversation history management
 ├── thinking-parser.ts  # Streaming <thinking> tag parser
