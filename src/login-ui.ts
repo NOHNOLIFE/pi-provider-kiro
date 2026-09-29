@@ -48,7 +48,7 @@ export async function showLoginUI(hasCached?: boolean): Promise<LoginChoice> {
         mainItems.push({
           value: "cached",
           label: "Use existing credentials",
-          description: "Use cached/IDE credentials",
+          description: "Use Pi/IDE cached credentials",
         });
       }
       mainItems.push(
