@@ -2,9 +2,9 @@
 //
 // Supports multiple auth methods:
 //   - "idc": AWS Builder ID or IAM Identity Center (SSO) via device code flow
-//   - "desktop": Google/GitHub social login via Kiro auth service (delegates to kiro-cli)
+//   - "desktop": Google/GitHub social login via Kiro auth service
 //
-// When no existing credentials are found (no Kiro IDE, no kiro-cli), falls back
+// When no existing credentials are found in Pi or the Kiro IDE, falls back
 // to the interactive login flow in login.ts (Feature 10).
 
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
@@ -173,20 +173,20 @@ async function loginKiroInternal(
 }
 
 async function useCachedCascade(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-  const ideCreds = getKiroIdeCredentials();
-  if (ideCreds) {
-    (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
-      "Using existing Kiro IDE credentials",
-    );
-    return ideCreds;
-  }
-
   const piCreds = getPiHostKiroCredentials();
   if (piCreds) {
     (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
       "Using existing Pi Kiro credentials",
     );
     return { ...piCreds, credentialSource: piCreds.credentialSource ?? "pi" };
+  }
+
+  const ideCreds = getKiroIdeCredentials();
+  if (ideCreds) {
+    (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
+      "Using existing Kiro IDE credentials",
+    );
+    return ideCreds;
   }
 
   const expiredIdeCreds = getKiroIdeCredentialsAllowExpired();
