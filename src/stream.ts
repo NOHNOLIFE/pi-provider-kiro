@@ -51,7 +51,8 @@ import {
   resolveKiroProfileArn,
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
-import { kiroAuthHeaders } from "./oauth.js";
+import { kiroAuthHeaders, refreshKiroToken, type KiroCredentials } from "./oauth.js";
+import { getPiHostKiroCredentialsAllowExpired } from "./pi-auth-store.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -583,6 +584,39 @@ function streamKiroWithUsageTracking(
           // best-effort — the host's persistence is not load-bearing for this turn.
         }
       };
+
+      const refreshRejectedCredential = async (rejectedToken: string): Promise<KiroCredentials | undefined> => {
+        if (!credentialAccessor) return undefined;
+
+        // Pi persists the full OAuth credential in auth.json. If another process
+        // already rotated it, adopt that newer token. Otherwise refresh the same
+        // persisted credential directly and hand the result back to Pi.
+        const stored = getPiHostKiroCredentialsAllowExpired();
+        if (stored?.access && stored.access !== rejectedToken) {
+          return stored;
+        }
+        if (stored?.access === rejectedToken && stored.refresh) {
+          try {
+            const refreshed = (await refreshKiroToken(stored)) as KiroCredentials;
+            writeBackCredential(refreshed, rejectedToken);
+            return refreshed;
+          } catch {
+            // Fall through to the host accessor; it may have another persistence
+            // backend or may have refreshed concurrently.
+          }
+        }
+
+        try {
+          await credentialAccessor.ensureFresh?.();
+        } catch {
+          // Best effort.
+        }
+        const hostToken = credentialAccessor.get?.();
+        if (hostToken && hostToken !== rejectedToken) {
+          return stored ? { ...stored, access: hostToken } : ({ access: hostToken } as KiroCredentials);
+        }
+        return undefined;
+      };
       const modelMetadata = model as Model<Api> & {
         kiroModelId?: string;
         kiroRegion?: string;
@@ -604,25 +638,23 @@ function streamKiroWithUsageTracking(
       } catch (error) {
         if (!(error instanceof KiroManagementHttpError) || error.status !== 403) throw error;
 
-        // Ask the host to refresh the credential it owns. This keeps account
-        // identity and persistence in one place and avoids consulting kiro-cli.
         const rejectedToken = accessToken;
-        try {
-          await credentialAccessor?.ensureFresh?.();
-        } catch {
-          // Best effort; inspect the host token below.
-        }
-        const refreshedToken = credentialAccessor?.get?.();
-        if (!refreshedToken || refreshedToken === rejectedToken) {
-          refreshTrace.push(
-            refreshedToken ? "profile-403: refreshed token identical (entitlement?)" : "profile-403: refresh returned no token",
-          );
+        const freshCreds = await refreshRejectedCredential(rejectedToken);
+        if (!freshCreds?.access) {
+          refreshTrace.push("profile-403: refresh returned no token");
           throw error;
         }
-        refreshTrace.push("profile-403: refreshed via Pi auth");
-        accessToken = refreshedToken;
+        refreshTrace.push(
+          freshCreds.access === rejectedToken
+            ? "profile-403: refreshed token identical (entitlement?)"
+            : "profile-403: refreshed via Pi auth",
+        );
+        if (freshCreds.access === rejectedToken) throw error;
+        accessToken = freshCreds.access;
         managementAuth = { accessToken, region };
-        profileArn = skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth);
+        profileArn =
+          freshCreds.profileArn ||
+          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
       }
 
       // ListAvailableProfiles probes across regions (#104, #131), so an SSO login
@@ -1096,35 +1128,28 @@ function streamKiroWithUsageTracking(
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
               credentialRefreshTotal++;
-              // Refresh through Pi's credential owner instead of kiro-cli. The host
-              // persists rotated refresh/access tokens and exposes the newest access
-              // token through the accessor.
               invalidateKiroProfileArn(managementAuth);
               const rejectedAccessToken = accessToken;
               const rejectedProfileArn = profileArn;
-              try {
-                await credentialAccessor?.ensureFresh?.();
-              } catch {
-                // Best effort; inspect accessor state below.
-              }
-              const refreshedAccessToken = credentialAccessor?.get?.();
-              if (refreshedAccessToken) accessToken = refreshedAccessToken;
+              const freshCreds = await refreshRejectedCredential(rejectedAccessToken);
+              if (freshCreds?.access) accessToken = freshCreds.access;
               refreshTrace.push(
-                !refreshedAccessToken
+                !freshCreds?.access
                   ? `runtime-403 #${retryCount}: refresh returned no token`
-                  : refreshedAccessToken === rejectedAccessToken
+                  : freshCreds.access === rejectedAccessToken
                     ? `runtime-403 #${retryCount}: refreshed token identical (entitlement?)`
                     : `runtime-403 #${retryCount}: refreshed via Pi auth`,
               );
               managementAuth = { accessToken, region };
 
-              // Desktop/social sessions can have a profile ARN that management
-              // cannot rediscover. Preserve the already-proven profile when the host
-              // rotated the token for the same stored credential.
+              // Social profiles are not always rediscoverable through management.
+              // Prefer the refreshed credential's profile, then the profile already
+              // proven by the rejected request when the same Pi credential rotated.
               profileArn =
-                refreshedAccessToken && refreshedAccessToken !== rejectedAccessToken
+                freshCreds?.profileArn ||
+                (freshCreds?.access && freshCreds.access !== rejectedAccessToken
                   ? rejectedProfileArn
-                  : (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+                  : (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth)));
               // A replacement credential can carry a profile in another region,
               // so re-pin the runtime host before retrying.
               runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
