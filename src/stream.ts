@@ -43,7 +43,6 @@ import {
 } from "./history.js";
 import { isKiroToolStructureRule, kiroConversationEntries, repairKiroConversation } from "./history-validator.js";
 import { parseInvokeToolCalls } from "./invoke-tool-parser.js";
-import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import {
   invalidateKiroProfileArn,
   type KiroManagementAuth,
@@ -571,7 +570,7 @@ function streamKiroWithUsageTracking(
         // best-effort — fall through to whatever token the host holds.
       }
       const seededToken = credentialAccessor?.get?.() || options?.apiKey;
-      if (!seededToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
+      if (!seededToken) throw new Error("Kiro credentials not set. Run /login kiro.");
       let accessToken: string = seededToken;
       // Persist a refreshed credential back to the host, once, only when the token
       // actually changed. Never throws: a classification/persist failure must not
@@ -596,9 +595,7 @@ function streamKiroWithUsageTracking(
       const optionProfileArn =
         (options as unknown as { credentials?: { profileArn?: string }; profileArn?: string })?.credentials
           ?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
-      const cliCreds = getKiroCliCredentials() ?? getKiroCliCredentialsAllowExpired();
-      const cliProfileArn = cliCreds?.access === accessToken ? cliCreds.profileArn : undefined;
-      const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn || cliProfileArn;
+      const initialProfileArn = modelMetadata.kiroProfileArn || optionProfileArn;
       let profileArn: string;
       try {
         profileArn =
@@ -607,35 +604,25 @@ function streamKiroWithUsageTracking(
       } catch (error) {
         if (!(error instanceof KiroManagementHttpError) || error.status !== 403) throw error;
 
-        // The host may have captured an access token before kiro-cli rotated it.
-        // Re-read the shared store first, then force a refresh only when it still
-        // contains the rejected token. Profile discovery must succeed before the
-        // runtime request can be constructed.
+        // Ask the host to refresh the credential it owns. This keeps account
+        // identity and persistence in one place and avoids consulting kiro-cli.
         const rejectedToken = accessToken;
-        const storedCreds = getKiroCliCredentials();
-        const forcedRefresh = !(storedCreds?.access && storedCreds.access !== accessToken);
-        const freshCreds = forcedRefresh ? refreshViaKiroCli() : storedCreds;
-        if (!freshCreds?.access) {
+        try {
+          await credentialAccessor?.ensureFresh?.();
+        } catch {
+          // Best effort; inspect the host token below.
+        }
+        const refreshedToken = credentialAccessor?.get?.();
+        if (!refreshedToken || refreshedToken === rejectedToken) {
           refreshTrace.push(
-            forcedRefresh ? "profile-403: refresh returned no token" : "profile-403: store had no fresh token",
+            refreshedToken ? "profile-403: refreshed token identical (entitlement?)" : "profile-403: refresh returned no token",
           );
           throw error;
         }
-        refreshTrace.push(
-          freshCreds.access === rejectedToken
-            ? "profile-403: refreshed token identical (entitlement?)"
-            : forcedRefresh
-              ? "profile-403: refreshed via kiro-cli"
-              : "profile-403: adopted token from store",
-        );
-
-        accessToken = freshCreds.access;
-        // Hand the refreshed credential back to the host so it survives the call.
-        writeBackCredential(freshCreds, rejectedToken);
+        refreshTrace.push("profile-403: refreshed via Pi auth");
+        accessToken = refreshedToken;
         managementAuth = { accessToken, region };
-        profileArn =
-          freshCreds.profileArn ||
-          (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+        profileArn = skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth);
       }
 
       // ListAvailableProfiles probes across regions (#104, #131), so an SSO login
@@ -1109,48 +1096,35 @@ function streamKiroWithUsageTracking(
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
               credentialRefreshTotal++;
-              // Re-read the shared store first in case another process already
-              // rotated the token. If it still contains the rejected token,
-              // force kiro-cli to refresh before retrying runtime.
+              // Refresh through Pi's credential owner instead of kiro-cli. The host
+              // persists rotated refresh/access tokens and exposes the newest access
+              // token through the accessor.
               invalidateKiroProfileArn(managementAuth);
               const rejectedAccessToken = accessToken;
               const rejectedProfileArn = profileArn;
-              const storedCreds = getKiroCliCredentials();
-              const rejectedCliCreds =
-                storedCreds?.access === rejectedAccessToken
-                  ? storedCreds
-                  : cliCreds?.access === rejectedAccessToken
-                    ? cliCreds
-                    : undefined;
-              const freshCreds: ReturnType<typeof getKiroCliCredentials> =
-                storedCreds?.access && storedCreds.access !== rejectedAccessToken ? storedCreds : refreshViaKiroCli();
-              const forcedRefresh = !(storedCreds?.access && storedCreds.access !== rejectedAccessToken);
-              if (freshCreds?.access) accessToken = freshCreds.access;
+              try {
+                await credentialAccessor?.ensureFresh?.();
+              } catch {
+                // Best effort; inspect accessor state below.
+              }
+              const refreshedAccessToken = credentialAccessor?.get?.();
+              if (refreshedAccessToken) accessToken = refreshedAccessToken;
               refreshTrace.push(
-                !freshCreds?.access
-                  ? `runtime-403 #${retryCount}: ${forcedRefresh ? "refresh returned no token" : "store had no fresh token"}`
-                  : freshCreds.access === rejectedAccessToken
+                !refreshedAccessToken
+                  ? `runtime-403 #${retryCount}: refresh returned no token`
+                  : refreshedAccessToken === rejectedAccessToken
                     ? `runtime-403 #${retryCount}: refreshed token identical (entitlement?)`
-                    : forcedRefresh
-                      ? `runtime-403 #${retryCount}: refreshed via kiro-cli`
-                      : `runtime-403 #${retryCount}: adopted token from store`,
+                    : `runtime-403 #${retryCount}: refreshed via Pi auth`,
               );
-              // Hand the refreshed credential back to the host so it survives the
-              // call. Guarded on a genuine change inside writeBackCredential.
-              if (freshCreds?.access) writeBackCredential(freshCreds, rejectedAccessToken);
               managementAuth = { accessToken, region };
 
-              // Social profiles may not be discoverable through management.
-              // Carry the profile used by the rejected request only across a
-              // confirmed desktop-to-desktop credential replacement.
-              const inheritedDesktopProfileArn =
-                rejectedCliCreds?.authMethod === "desktop" && freshCreds?.authMethod === "desktop"
-                  ? rejectedProfileArn
-                  : undefined;
+              // Desktop/social sessions can have a profile ARN that management
+              // cannot rediscover. Preserve the already-proven profile when the host
+              // rotated the token for the same stored credential.
               profileArn =
-                freshCreds?.profileArn ||
-                inheritedDesktopProfileArn ||
-                (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
+                refreshedAccessToken && refreshedAccessToken !== rejectedAccessToken
+                  ? rejectedProfileArn
+                  : (skipProfileResolutionForTests ? TEST_PROFILE_ARN : await resolveKiroProfileArn(managementAuth));
               // A replacement credential can carry a profile in another region,
               // so re-pin the runtime host before retrying.
               runtimeRegion = getKiroRegionFromProfileArn(profileArn) ?? region;
