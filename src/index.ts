@@ -213,7 +213,10 @@ export default function (pi: ExtensionAPI) {
         return [...nonKiro, ...modifiedKiro];
       },
       fetchUsage: fetchKiroUsage,
-    },
+      // ProviderConfig.oauth's public type lags the runtime OAuth extension surface.
+      // fetchUsage is consumed by pi at runtime, so keep the compatibility cast here.
+      // biome-ignore lint/suspicious/noExplicitAny: runtime OAuth interface includes fetchUsage
+    } as any,
     streamSimple,
   });
 
