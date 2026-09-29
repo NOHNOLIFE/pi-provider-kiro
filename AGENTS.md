@@ -14,7 +14,8 @@ pi-provider-kiro/
 │   ├── index.ts            # F1: Extension registration entry point
 │   ├── models.ts           # F2: Model catalog + ID resolution
 │   ├── oauth.ts            # F3: Multi-provider OAuth (Builder ID / Google / GitHub)
-│   ├── kiro-cli.ts         # F4: kiro-cli SQLite credential sharing
+│   ├── kiro-ide.ts         # optional Kiro IDE credential reuse
+│   ├── pi-auth-store.ts    # Pi-owned credential reuse
 │   ├── transform.ts        # F5: pi ↔ Kiro message transformation
 │   ├── history.ts          # F6: History truncation + sanitization
 │   ├── thinking-parser.ts  # F7: Streaming <thinking> tag parser
@@ -58,19 +59,22 @@ On 413/too-large: error propagated immediately to the caller (no retry). The cal
 HTTP 429 is provider-retried only when its JSON `reason` is exactly `USER_REQUEST_RATE_EXCEEDED`; server wait hints and the 10-second fallback/cap are owned by `src/retry.ts`. Other generic 429/5xx responses remain owned by Pi's outer retry layer.
 
 ### Credential Cascade
-1. kiro-cli SQLite DB — checks social token first (`kirocli:social:token`), then IDC token, then external IdP token (`kirocli:external-idp:token`)
-2. OAuth device code flow (interactive, opens browser)
+1. Pi's own persisted Kiro credential (`~/.pi/agent/auth.json`)
+2. Kiro IDE AWS SSO cache (`~/.aws/sso/cache/kiro-auth-token.json`)
+3. Native interactive login
+
+The provider never reads or writes kiro-cli's SQLite database and never shells out to `kiro-cli`.
 
 ### Auth Methods
 - `idc`: AWS Builder ID or IAM Identity Center (SSO). Refresh via SSO OIDC endpoint. Token format: `refreshToken|clientId|clientSecret|idc`. Preferred — has clientId/clientSecret for refresh.
 - `desktop`: Google/GitHub social login via Kiro auth service. Refresh via `prod.{region}.auth.desktop.kiro.dev`. Token format: `refreshToken|desktop`
-- `external-idp`: Enterprise OIDC IdP (e.g. Okta) configured by the org, established by `kiro-cli login`. Refresh is a public-client `refresh_token` grant against the tenant's own `token_endpoint` (form-encoded, snake_case response, no client secret). Token format: `refreshToken|clientId|tokenEndpoint|external-idp`. Requests **must** carry `tokentype: EXTERNAL_IDP` or Kiro answers 403 "Invalid token" — see `src/token-type.ts`.
+- `external-idp`: Enterprise OIDC IdP credentials already persisted in Pi remain refreshable through the tenant token endpoint. Token format: `refreshToken|clientId|tokenEndpoint|external-idp`.
 
 ### Login Methods
 Users can authenticate via:
 - **Builder ID**: Native device code flow (works in SSH/remote)
-- **Google**: Social login (delegates to `kiro-cli login`, requires local browser or SSH port forwarding)
-- **GitHub**: Social login (delegates to `kiro-cli login`, requires local browser or SSH port forwarding)
+- **Google**: Native browser PKCE login (requires local browser or SSH port forwarding)
+- **GitHub**: Native browser PKCE login (requires local browser or SSH port forwarding)
 
 ## Development
 
@@ -100,10 +104,9 @@ npm run test:watch # vitest (watch mode)
 
 - `ZERO_COST` is a frozen shared object — don't try to mutate model costs
 - The `as any` cast in `index.ts` is intentional — `ProviderConfig.oauth` doesn't type `getCliCredentials`
-- `kiro-cli.ts` uses `sqlite3` CLI via `execSync`, not a Node native module
 - Output token count is estimated (`content.length / 4`), not from the API
 - `contextUsagePercentage` is the only usage metric Kiro provides; input tokens are back-calculated
-- Social login (Google/GitHub) requires `kiro-cli` to be installed — pi delegates the auth flow to it
+- Social login (Google/GitHub) is handled directly by the provider; no `kiro-cli` installation is required
 
 ## Maintaining this file
 
