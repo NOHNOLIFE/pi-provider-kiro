@@ -11,7 +11,8 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-a
 import { formatSafeError } from "./debug.js";
 import { resolveApiRegion } from "./endpoints.js";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
-import { interactiveLogin, loginViaKiroCli } from "./login.js";
+import { interactiveLogin, runSocialLoginFlow } from "./login.js";
+import { getPiHostKiroCredentials, getPiHostKiroCredentialsAllowExpired } from "./pi-auth-store.js";
 
 export const SSO_OIDC_ENDPOINT = "https://oidc.us-east-1.amazonaws.com";
 export const BUILDER_ID_START_URL = "https://view.awsapps.com/start";
@@ -27,6 +28,7 @@ export const SSO_SCOPES = [
 
 export type KiroAuthMethod = "idc" | "desktop" | "external-idp" | "apikey";
 export type KiroLoginMethod = "auto" | "builder-id" | "google" | "github";
+export type KiroCredentialSource = "ide" | "pi" | "direct";
 
 export interface KiroCredentials extends OAuthCredentials {
   clientId: string;
@@ -37,6 +39,8 @@ export interface KiroCredentials extends OAuthCredentials {
   profileArn?: string;
   startUrl?: string;
   isEnterprise?: boolean;
+  /** Where the credential originated. Used to avoid cross-account refresh adoption. */
+  credentialSource?: KiroCredentialSource;
 }
 
 export const KIRO_DESKTOP_USER_AGENT = "Kiro-Desktop/0.2.13 (darwin; arm64)";
@@ -112,6 +116,7 @@ export async function loginKiroWithApiKey(callbacks: OAuthLoginCallbacks, apiKey
     clientSecret: "",
     region,
     authMethod: "apikey",
+    credentialSource: "direct",
     ...(profileArn ? { profileArn } : {}),
   };
 
@@ -121,9 +126,9 @@ export async function loginKiroWithApiKey(callbacks: OAuthLoginCallbacks, apiKey
 /**
  * Login to Kiro using the specified method.
  *
- * - "auto": Use existing kiro-cli credentials if available (any method)
+ * - "auto": Reuse Pi/Kiro IDE credentials when available
  * - "builder-id": AWS Builder ID via device code flow
- * - "google" | "github": Social login via kiro-cli (requires kiro-cli installed)
+ * - "google" | "github": Native browser PKCE login (no kiro-cli required)
  */
 export async function loginKiro(
   callbacks: OAuthLoginCallbacks,
@@ -148,40 +153,26 @@ async function loginKiroInternal(
   callbacks: OAuthLoginCallbacks,
   preferredMethod: KiroLoginMethod = "auto",
 ): Promise<OAuthCredentials> {
-  const { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, getKiroCliSocialToken } = await import(
-    "./kiro-cli.js"
-  );
-
-  // If user explicitly wants social login, delegate to kiro-cli
+  // Social login is implemented directly against Kiro's browser PKCE flow.
   if (preferredMethod === "google" || preferredMethod === "github") {
-    return loginViaKiroCli(callbacks, preferredMethod);
+    return runSocialLoginFlow(callbacks, preferredMethod);
   }
 
   const ideCreds = getKiroIdeCredentials();
-  const cliCreds = getKiroCliSocialToken() || getKiroCliCredentials();
+  const piCreds = getPiHostKiroCredentials();
   const expiredIdeCreds = getKiroIdeCredentialsAllowExpired();
-  const expiredCreds = getKiroCliCredentialsAllowExpired();
+  const expiredPiCreds = getPiHostKiroCredentialsAllowExpired();
+  const hasCached = Boolean(ideCreds || piCreds || expiredIdeCreds || expiredPiCreds);
 
-  const hasCached = Boolean(ideCreds || cliCreds || expiredIdeCreds || expiredCreds);
-
-  const { interactiveLogin } = await import("./login.js");
   const result = await interactiveLogin(callbacks, hasCached);
-
   if (result !== "use-cached-credentials") {
     return result;
   }
 
-  // User chose to use cached credentials from the TUI menu
-  return useCachedCascade(callbacks, preferredMethod);
+  return useCachedCascade(callbacks);
 }
 
-async function useCachedCascade(
-  callbacks: OAuthLoginCallbacks,
-  preferredMethod: KiroLoginMethod = "auto",
-): Promise<OAuthCredentials> {
-  const { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials, getKiroCliSocialToken } =
-    await import("./kiro-cli.js");
-
+async function useCachedCascade(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
   const ideCreds = getKiroIdeCredentials();
   if (ideCreds) {
     (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
@@ -190,26 +181,12 @@ async function useCachedCascade(
     return ideCreds;
   }
 
-  let cliCreds = getKiroCliSocialToken();
-  if (!cliCreds) {
-    cliCreds = getKiroCliCredentials();
-  }
-
-  if (
-    cliCreds &&
-    (preferredMethod === "auto" ||
-      cliCreds.authMethod === "idc" ||
-      cliCreds.authMethod === "external-idp" ||
-      cliCreds.authMethod === "apikey")
-  ) {
+  const piCreds = getPiHostKiroCredentials();
+  if (piCreds) {
     (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
-      cliCreds.authMethod === "desktop"
-        ? "Using existing kiro-cli social credentials"
-        : cliCreds.authMethod === "external-idp"
-          ? "Using existing kiro-cli external IdP credentials"
-          : "Using existing kiro-cli credentials",
+      "Using existing Pi Kiro credentials",
     );
-    return cliCreds;
+    return { ...piCreds, credentialSource: piCreds.credentialSource ?? "pi" };
   }
 
   const expiredIdeCreds = getKiroIdeCredentialsAllowExpired();
@@ -220,25 +197,23 @@ async function useCachedCascade(
       );
       return await refreshKiroTokenDirect(expiredIdeCreds);
     } catch {
-      // Ignore
+      // Continue to Pi's own cached credential.
     }
   }
 
-  const expiredCreds = getKiroCliCredentialsAllowExpired();
-  if (expiredCreds) {
+  const expiredPiCreds = getPiHostKiroCredentialsAllowExpired();
+  if (expiredPiCreds) {
     try {
       (callbacks as unknown as { onProgress?: (msg: string) => void }).onProgress?.(
-        "Refreshing expired kiro-cli credentials...",
+        "Refreshing existing Pi Kiro credentials...",
       );
-      const refreshed = await refreshKiroTokenDirect(expiredCreds);
-      saveKiroCliCredentials(refreshed as KiroCredentials);
-      return refreshed;
+      return await refreshKiroTokenDirect({ ...expiredPiCreds, credentialSource: expiredPiCreds.credentialSource ?? "pi" });
     } catch {
-      // Ignore
+      // Fall through to a clean login error.
     }
   }
 
-  throw new Error("No valid cached credentials found");
+  throw new Error("No valid cached Kiro credentials found");
 }
 
 /**
@@ -270,71 +245,34 @@ export async function refreshKiroToken(credentials: OAuthCredentials): Promise<O
 }
 
 async function refreshKiroTokenInternal(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-  const {
-    getKiroCliCredentials,
-    getKiroCliCredentialsAllowExpired,
-    saveKiroCliCredentials,
-    getKiroCliSocialToken,
-    getKiroCliSocialTokenAllowExpired,
-  } = await import("./kiro-cli.js");
+  const kiroCredentials = credentials as KiroCredentials;
   const credentialAuthMethod =
-    (credentials as KiroCredentials).authMethod ??
+    kiroCredentials.authMethod ??
     (credentials.refresh.split("|").at(-1) === "desktop" ? "desktop" : "idc");
-  const getValidCliCredentials = (): KiroCredentials | undefined => {
-    if (credentialAuthMethod === "desktop") return getKiroCliSocialToken();
-    const cliCreds = getKiroCliCredentials();
-    return cliCreds?.authMethod === "idc" ? cliCreds : undefined;
-  };
-  const getExpiredCliCredentials = (): KiroCredentials | undefined => {
-    if (credentialAuthMethod === "desktop") return getKiroCliSocialTokenAllowExpired();
-    const cliCreds = getKiroCliCredentialsAllowExpired();
-    return cliCreds?.authMethod === "idc" ? cliCreds : undefined;
-  };
 
-  // API key credentials are long-lived bearer tokens — there is nothing to
-  // refresh. Return them unchanged so the same key keeps being used.
-  if ((credentials as KiroCredentials).authMethod === "apikey" || isApiKey(credentials.access)) {
+  if (credentialAuthMethod === "apikey" || isApiKey(credentials.access)) {
     return credentials;
   }
 
-  // Kiro IDE credentials are IDC credentials. Only consult them for IDC
-  // credential refresh — never replace a stored social/desktop session with
-  // the IDE's potentially unrelated account (auth-family guard, #142).
-  if (credentialAuthMethod === "idc") {
+  // Credentials explicitly sourced from the IDE may be refreshed by Kiro/KAM
+  // out-of-process. Re-read that file first, but never adopt IDE credentials for
+  // a Pi/direct credential: that could silently switch accounts.
+  if (kiroCredentials.credentialSource === "ide") {
     const ideCreds = getKiroIdeCredentials();
     if (ideCreds) return ideCreds;
   }
 
-  // Prefer a fresh CLI token only when it belongs to the same auth family.
-  const preCheckCreds = getValidCliCredentials();
-  if (preCheckCreds) return preCheckCreds;
-
   try {
-    const refreshed = await refreshKiroTokenDirect(credentials);
-
-    // Write refreshed tokens back to kiro-cli's SQLite DB so both stay in sync.
-    saveKiroCliCredentials(refreshed as KiroCredentials);
-
-    return refreshed;
+    return await refreshKiroTokenDirect(credentials);
   } catch (refreshError) {
-    // The CLI may have rotated the refresh token between the pre-check and
-    // network call. Re-read only the matching auth family.
-    const retryCreds = getValidCliCredentials();
-    if (retryCreds) return retryCreds;
-
-    // The CLI may have a newer refresh token with an expired access token.
-    const expiredCliCreds = getExpiredCliCredentials();
-    if (expiredCliCreds && expiredCliCreds.refresh !== credentials.refresh) {
-      try {
-        const refreshedFromCli = await refreshKiroTokenDirect(expiredCliCreds);
-        saveKiroCliCredentials(refreshedFromCli as KiroCredentials);
-        return refreshedFromCli;
-      } catch {
-        // Also failed, continue to remaining fallbacks
-      }
+    if (kiroCredentials.credentialSource === "ide") {
+      const retryIdeCreds = getKiroIdeCredentials();
+      if (retryIdeCreds) return retryIdeCreds;
     }
 
-    // Our expires has a 5-min buffer, so the actual token may still be valid.
+    // Our expires timestamp includes an early-refresh buffer. If refresh fails
+    // inside that buffer, keep using the still-valid access token until its real
+    // expiry instead of failing the turn early.
     const actualExpiry = credentials.expires + EXPIRES_BUFFER_MS;
     if (credentials.access && Date.now() < actualExpiry) {
       return { ...credentials, expires: actualExpiry };
@@ -381,6 +319,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       authMethod: "desktop" as KiroAuthMethod,
       profileArn: data.profileArn || (credentials as KiroCredentials).profileArn,
       startUrl: (credentials as KiroCredentials).startUrl,
+      credentialSource: (credentials as KiroCredentials).credentialSource ?? "direct",
     };
   }
 
@@ -422,6 +361,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       region,
       authMethod: "external-idp" as KiroAuthMethod,
       profileArn: (credentials as KiroCredentials).profileArn,
+      credentialSource: (credentials as KiroCredentials).credentialSource ?? "pi",
     };
   }
 
@@ -450,5 +390,6 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     profileArn: (credentials as KiroCredentials).profileArn,
     startUrl: (credentials as KiroCredentials).startUrl,
     isEnterprise: (credentials as KiroCredentials).isEnterprise,
+    credentialSource: (credentials as KiroCredentials).credentialSource ?? "pi",
   };
 }
