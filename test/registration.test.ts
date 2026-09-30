@@ -231,6 +231,17 @@ describe("Feature 1: Extension Registration", () => {
   });
 
   it("registers an IDE-first bootstrap credential hook", async () => {
+    credentialMocks.ide.mockReturnValue({
+      access: "ide-bootstrap",
+      refresh: "ide-refresh|desktop",
+      expires: Date.now() + 60_000,
+      region: "us-east-1",
+      authMethod: "desktop",
+      clientId: "",
+      clientSecret: "",
+    });
+    credentialMocks.social.mockReturnValue(cliOauthCredential);
+
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     await mod.default(pi);
@@ -243,19 +254,9 @@ describe("Feature 1: Extension Registration", () => {
     expect(config.oauth.getApiKey({ access: "existing-access-token" })).toBe("existing-access-token");
     expect(typeof config.oauth.fetchUsage).toBe("function");
 
-    credentialMocks.ide.mockReturnValue({
-      access: "ide-bootstrap",
-      refresh: "ide-refresh|desktop",
-      expires: Date.now() + 60_000,
-      region: "us-east-1",
-      authMethod: "desktop",
-      clientId: "",
-      clientSecret: "",
-    });
-    credentialMocks.social.mockReturnValue(cliOauthCredential);
-
     expect(config.oauth.getCliCredentials().access).toBe("ide-bootstrap");
     expect(credentialMocks.social).not.toHaveBeenCalled();
+    expect(credentialMocks.cli).not.toHaveBeenCalled();
   });
   it("registers a streamSimple handler", async () => {
     const mod = await import("../src/index.js");
