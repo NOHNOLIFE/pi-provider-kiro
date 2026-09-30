@@ -26,7 +26,7 @@ function readPiHostKiroCredentials(agentDir: string, allowExpired: boolean): Kir
 
   const kiro = asRecord(asRecord(raw)?.kiro);
   if (!kiro || typeof kiro.access !== "string" || !kiro.access) return undefined;
-  if (typeof kiro.refresh !== "string" || !kiro.refresh) return undefined;
+  if (allowExpired && (typeof kiro.refresh !== "string" || !kiro.refresh)) return undefined;
 
   if (!allowExpired && typeof kiro.expires === "number" && Number.isFinite(kiro.expires)) {
     if (Date.now() >= kiro.expires - EXPIRY_BUFFER_MS) return undefined;
