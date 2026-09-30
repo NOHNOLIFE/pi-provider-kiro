@@ -3441,7 +3441,7 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("retries on 403 with shorter backoff", async () => {
+  it("retries on 403 after Pi-host credential rotation", async () => {
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({
@@ -3467,15 +3467,32 @@ describe("Feature 9: Streaming Integration", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    let token = "tok";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        // streamKiro calls ensureFresh once proactively before the first request.
+        // The second call is the reactive 403 refresh and must rotate the token.
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+      set: vi.fn(),
+    };
+
+    const stream = streamKiro(makeModel(), makeContext(), {
+      apiKey: "tok",
+      credentialAccessor: accessor,
+    });
     const events = await collect(stream);
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer tok");
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-token");
     expect(events.find((e) => e.type === "done")).toBeDefined();
 
     vi.unstubAllGlobals();
   });
-
   it("refreshes rejected Pi credentials and retries runtime without consulting kiro-cli", async () => {
     resetProfileArnCache(false);
     const profileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
@@ -3653,16 +3670,31 @@ describe("Feature 9: Streaming Integration", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok", signal: ac.signal });
+    let token = "tok";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+      set: vi.fn(),
+    };
 
-    // Abort after fetch returns but during the backoff delay
+    const stream = streamKiro(makeModel(), makeContext(), {
+      apiKey: "tok",
+      signal: ac.signal,
+      credentialAccessor: accessor,
+    });
+
+    // Abort after the 403 is refreshed but while the retry backoff is sleeping.
     setTimeout(() => ac.abort(), 50);
 
     const start = Date.now();
     const events = await collect(stream);
     const elapsed = Date.now() - start;
 
-    // Should abort quickly, not wait the full 1s+ backoff
+    // Should abort quickly, not wait the full 500ms+ backoff.
     expect(elapsed).toBeLessThan(500);
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const error = events.find((e) => e.type === "error");
@@ -3671,11 +3703,6 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
-
-  // =========================================================================
-  // Content deduplication (Task 2.2)
-  // =========================================================================
-
   it("deduplicates consecutive identical content events", async () => {
     const mockFetch = mockFetchChunked([
       '{"content":"Hello"}',
@@ -5680,10 +5707,10 @@ describe("Feature 9: Streaming Integration", () => {
   }, 30000);
 
   it("does not call the degenerate attempts consecutive when a 403 refresh interleaved them", async () => {
-    // The degenerate attempts need not be adjacent. A 403 spends the same shared
-    // `retryCount` budget and re-enters the outer loop, so attempts 1, 3 and 4 can
-    // be empty while attempt 2 was a credential refresh. The count is still 3, but
-    // asserting they were *consecutive* would describe a run that never happened.
+    // The degenerate attempts need not be adjacent. A successful Pi-owned 403
+    // credential refresh spends the same shared retryCount budget and re-enters
+    // the outer loop, so attempts 1, 3 and 4 can be empty while attempt 2 was a
+    // credential refresh. The count is still 3, but they were not consecutive.
     const empty = '{"contextUsagePercentage":50}';
     const makeResponse = () => ({
       ok: true,
@@ -5711,10 +5738,26 @@ describe("Feature 9: Streaming Integration", () => {
     vi.stubGlobal("fetch", mockFetch);
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), { apiKey: "tok" });
+    let token = "tok";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+      set: vi.fn(),
+    };
+
+    const stream = streamKiro(makeModel({ reasoning: false }), makeContext(), {
+      apiKey: "tok",
+      credentialAccessor: accessor,
+    });
     const events = await collect(stream);
 
     expect(mockFetch).toHaveBeenCalledTimes(4);
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer tok");
+    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
     const done = events.find((e) => e.type === "done");
     const msg = done?.type === "done" ? done.message : undefined;
     expect(msg?.errorMessage).toContain("3 attempts");
@@ -5729,7 +5772,6 @@ describe("Feature 9: Streaming Integration", () => {
     warnSpy.mockRestore();
     vi.unstubAllGlobals();
   }, 30000);
-
   it("caps the echoed text quoted into errorMessage instead of persisting it whole", async () => {
     // The echo pattern admits an unbounded run of dots, and `errorMessage` is
     // persisted on the assistant record, so the quote has to be capped. The exact
