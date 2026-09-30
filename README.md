@@ -2,6 +2,24 @@
 
 A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the **Kiro API** (AWS CodeWhisperer/Q), exposing **12 kiro-cli-verified models** through one provider surface.
 
+## Differences from upstream
+
+This repository is a fork of [mikeyobrien/pi-provider-kiro](https://github.com/mikeyobrien/pi-provider-kiro). The main difference is **credential ownership and refresh behavior**.
+
+| | Upstream | This fork |
+|---|---|---|
+| Preferred existing-credential source | `kiro-cli` | **Kiro IDE / KAM first**, `kiro-cli` only as fallback |
+| KAM-injected IDE credentials | Not the primary path | Explicitly supported |
+| IDE credential types | Limited / secondary use | Supports both `social` and `IdC` cache formats |
+| Credential owner after import | May continue consulting `kiro-cli` | **Pi's `~/.pi/agent/auth.json` is authoritative** |
+| Token refresh | Can depend on `kiro-cli` state | **Pi refreshes and persists rotated tokens itself** |
+| Runtime 403 recovery | May re-read / refresh `kiro-cli` credentials | Refreshes the Pi-owned credential; does not substitute IDE/CLI state |
+| Runtime dependency on KAM / Kiro IDE / kiro-cli | Can remain relevant | **None after a successful bootstrap** |
+
+The purpose of this fork is to make long-running Pi sessions independent from `kiro-cli` token expiry or KAM-to-CLI synchronization. KAM/Kiro IDE is used only to bootstrap or intentionally switch accounts; after that, Pi owns the refresh-token lifecycle.
+
+Other provider behavior is intentionally kept close to upstream unless noted here.
+
 ## Why this exists
 
 Kiro gives you a strong free model menu, but pi needs a provider that speaks Kiro's auth, model catalog, and streaming protocol cleanly. `pi-provider-kiro` handles that bridge, including:
@@ -13,48 +31,49 @@ Kiro gives you a strong free model menu, but pi needs a provider that speaks Kir
 
 ## Quick start
 
-Install the provider:
+> **Important:** `pi install npm:pi-provider-kiro` installs the upstream npm package, not this fork.
+
+To use this fork, clone it and install the local repository:
 
 ```bash
-pi install npm:pi-provider-kiro
+git clone https://github.com/NOHNOLIFE/pi-provider-kiro.git
+cd pi-provider-kiro
+npm install
+npm run build
+pi install .
 ```
 
-Or install it globally with npm:
-
-```bash
-npm install -g pi-provider-kiro
-```
-
-Then log in from pi:
+Then log in from Pi:
 
 ```text
 /login kiro
 ```
 
-The login flow supports:
-- **AWS Builder ID** — native device-code flow, works well over SSH/remotes
-- **Your organization** — IAM Identity Center start URL
-- **Google** — social login via `kiro-cli`
-- **GitHub** — social login via `kiro-cli`
+For the workflow this fork is designed for:
 
-### KAM / Kiro IDE bootstrap
+1. Use Kiro Account Manager (KAM) to switch/inject the desired account into **Kiro IDE**.
+2. In Pi, run `/login kiro`.
+3. Choose **Use existing credentials**.
+4. The provider imports the IDE credential into Pi.
+5. From then on, Pi refreshes and persists the credential itself. KAM, Kiro IDE, and `kiro-cli` are no longer part of the runtime refresh path.
 
-If your account is supplied as JSON by Kiro Account Manager (KAM), switch/inject that account into **Kiro IDE** first, then run:
+The bootstrap order is:
 
-```text
-/login kiro
-```
+1. Kiro IDE cache: `~/.aws/sso/cache/kiro-auth-token.json`
+2. `kiro-cli` social credential, if available
+3. Other `kiro-cli` credentials
+4. Interactive OAuth login
 
-Choose **Use existing credentials**. The provider prefers `~/.aws/sso/cache/kiro-auth-token.json` over kiro-cli and imports both Kiro IDE credential families correctly:
+Kiro IDE / KAM credentials are normalized as follows:
 
-- `authMethod: "social"` (Google/GitHub) → Kiro desktop refresh endpoint
-- `authMethod: "IdC"` (Builder ID / IAM Identity Center) → AWS OIDC refresh endpoint using the companion `{clientIdHash}.json`
+- `authMethod: "social"` (Google/GitHub) → Kiro desktop refresh flow
+- `authMethod: "IdC"` (Builder ID / IAM Identity Center) → AWS OIDC refresh flow using the companion `{clientIdHash}.json`
 
-After that import, **Pi's `~/.pi/agent/auth.json` is authoritative**. Refresh-token rotation is owned by Pi and runtime 403 recovery no longer reads or refreshes kiro-cli/IDE credentials.
+After import, **Pi's `~/.pi/agent/auth.json` is authoritative**. Refresh-token rotation and runtime `403` recovery use the Pi-owned credential instead of re-reading or refreshing KAM/IDE/`kiro-cli` state.
 
-Because these refresh tokens can rotate, do not keep KAM/Kiro IDE actively refreshing the same imported account in parallel with Pi. Use KAM/IDE again only when you intentionally want to bootstrap/switch Pi to another account.
+Because refresh tokens may rotate, avoid actively refreshing the same account in KAM/Kiro IDE while Pi is using the imported credential. Use KAM/IDE again when you intentionally want to bootstrap or switch Pi to another account.
 
-If IDE credentials are unavailable, the provider still keeps the existing kiro-cli credential path as a bootstrap fallback.
+Interactive login is still available for the login methods supported by upstream.
 
 ## Models
 
@@ -181,7 +200,7 @@ src/
 ├── index.ts            # Extension registration
 ├── models.ts           # 12 model definitions + ID resolution
 ├── oauth.ts            # Multi-provider auth (Builder ID / Google / GitHub)
-├── kiro-cli.ts         # kiro-cli credential sharing
+├── kiro-cli.ts         # kiro-cli bootstrap compatibility / fallback import
 ├── transform.ts        # Message format conversion
 ├── history.ts          # Conversation history management
 ├── thinking-parser.ts  # Streaming <thinking> tag parser
