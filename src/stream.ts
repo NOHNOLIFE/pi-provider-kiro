@@ -51,7 +51,8 @@ import {
   resolveKiroProfileArn,
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
-import { kiroAuthHeaders } from "./oauth.js";
+import { kiroAuthHeaders, refreshKiroToken } from "./oauth.js";
+import { getPiHostKiroCredentials } from "./pi-auth-store.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -578,27 +579,46 @@ function streamKiroWithUsageTracking(
       // Pi-persisted credential. A changed token is required before retrying;
       // otherwise repeating the rejected token only burns the retry budget.
       const refreshFromHost = async (label: string, rejectedToken: string): Promise<string | undefined> => {
-        if (!credentialAccessor?.ensureFresh || !credentialAccessor.get) {
-          refreshTrace.push(`${label}: host refresh unavailable`);
+        if (credentialAccessor?.ensureFresh) {
+          try {
+            await credentialAccessor.ensureFresh();
+          } catch (error) {
+            refreshTrace.push(`${label}: host refresh failed (${formatSafeError(error)})`);
+          }
+        }
+
+        const hostToken = credentialAccessor?.get?.();
+        if (hostToken && hostToken !== rejectedToken) {
+          refreshTrace.push(`${label}: refreshed by Pi host`);
+          return hostToken;
+        }
+
+        // A 403 can arrive before the host considers the token expired, so
+        // ensureFresh() may legitimately be a no-op. Force-refresh Pi's own
+        // persisted credential in that case. Never consult IDE/CLI here.
+        const persisted = getPiHostKiroCredentials();
+        if (!persisted || persisted.access !== rejectedToken) {
+          refreshTrace.push(`${label}: no matching Pi credential to force-refresh`);
           return undefined;
         }
+
         try {
-          await credentialAccessor.ensureFresh();
+          const refreshed = (await refreshKiroToken(persisted)) as KiroCredentialLike;
+          if (!refreshed.access || refreshed.access === rejectedToken) {
+            refreshTrace.push(`${label}: force-refresh returned unchanged token`);
+            return undefined;
+          }
+          try {
+            credentialAccessor?.set?.(refreshed);
+          } catch {
+            // best-effort persistence; current call can still use the fresh token
+          }
+          refreshTrace.push(`${label}: force-refreshed Pi credential`);
+          return refreshed.access;
         } catch (error) {
-          refreshTrace.push(`${label}: host refresh failed (${formatSafeError(error)})`);
+          refreshTrace.push(`${label}: Pi force-refresh failed (${formatSafeError(error)})`);
           return undefined;
         }
-        const freshToken = credentialAccessor.get();
-        if (!freshToken) {
-          refreshTrace.push(`${label}: host returned no token`);
-          return undefined;
-        }
-        if (freshToken === rejectedToken) {
-          refreshTrace.push(`${label}: token unchanged (entitlement or non-expiry 403)`);
-          return undefined;
-        }
-        refreshTrace.push(`${label}: refreshed by Pi host`);
-        return freshToken;
       };
       const modelMetadata = model as Model<Api> & {
         kiroModelId?: string;
