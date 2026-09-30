@@ -179,7 +179,6 @@ describe("streamKiro credential accessor", () => {
     vi.unstubAllGlobals();
   });
 
-
   it("retries a runtime 403 with the token rotated by the Pi host", async () => {
     const fetch = mockFetch403ThenOk(1);
     vi.stubGlobal("fetch", fetch);
