@@ -24,6 +24,7 @@ interface KiroIdeTokenFile {
   clientIdHash?: string;
   authMethod?: string;
   provider?: string;
+  profileArn?: string;
 }
 
 interface KiroIdeClientFile {
@@ -42,10 +43,31 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
     const expiresAt = new Date(tokenData.expiresAt).getTime();
     if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
 
-    const region = tokenData.region ?? "us-east-1";
+    const profileRegion = tokenData.profileArn?.split(":")[3];
+    const region = tokenData.region || profileRegion || "us-east-1";
+    const authMethod = tokenData.authMethod?.toLowerCase();
+    const provider = tokenData.provider?.toLowerCase();
+    const isSocial =
+      authMethod === "social" ||
+      provider === "google" ||
+      provider === "github";
 
-    // Load the OIDC client registration so refreshKiroTokenDirect can call the
-    // AWS OIDC /token endpoint with a refresh_token grant without prompting the user.
+    if (isSocial) {
+      return {
+        refresh: `${tokenData.refreshToken}|desktop`,
+        access: tokenData.accessToken,
+        expires: expiresAt - 2 * 60 * 1000,
+        clientId: "",
+        clientSecret: "",
+        region,
+        authMethod: "desktop",
+        profileArn: tokenData.profileArn,
+        credentialSource: "ide",
+      };
+    }
+
+    // IdC / Builder ID sessions use the AWS OIDC client registration stored in
+    // the companion cache file.
     let clientId = "";
     let clientSecret = "";
     if (tokenData.clientIdHash) {
@@ -56,21 +78,20 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
           clientId = reg.clientId ?? "";
           clientSecret = reg.clientSecret ?? "";
         } catch {
-          // Ignore — we can still use the token without a refresh client
+          // Ignore — we can still use the access token until it expires.
         }
       }
     }
 
     return {
-      // Pack into the same pipe-delimited format used by the rest of the refresh chain
       refresh: `${tokenData.refreshToken}|${clientId}|${clientSecret}|idc`,
       access: tokenData.accessToken,
-      // Subtract 2-min buffer so we refresh before the actual AWS expiry
       expires: expiresAt - 2 * 60 * 1000,
       clientId,
       clientSecret,
       region,
       authMethod: "idc",
+      profileArn: tokenData.profileArn,
       credentialSource: "ide",
     };
   } catch {
