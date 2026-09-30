@@ -318,31 +318,16 @@ describe("typed classification per reason code", () => {
     }
   });
 
-  it("reports consumed 403 credential-refresh retries in providerAttempts", async () => {
-    // Two 403s each burn one credential-refresh retry, then a terminal 400
-    // reaches a throw site. The tally must survive both outer-loop iterations:
-    // `capacityRetryCount` is deliberately reset per iteration, so a
-    // per-iteration counter would report 0 here.
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 403,
-        statusText: "Forbidden",
-        text: () => Promise.resolve("Access denied"),
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 403,
-        statusText: "Forbidden",
-        text: () => Promise.resolve("Access denied"),
-      })
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 400,
-        statusText: "Bad Request",
-        text: () => Promise.resolve("Invalid parameter: modelId"),
-      });
+  it("reports one 403 refresh attempt when no Pi-owned refresh path is available", async () => {
+    // A bare apiKey has no Pi-owned OAuth credential to rotate. The provider
+    // records the attempted auth recovery, but must not fall back to IDE/CLI or
+    // blindly replay the rejected token.
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      statusText: "Forbidden",
+      text: () => Promise.resolve("Access denied"),
+    });
     vi.stubGlobal("fetch", mockFetch);
     resetProfileArnCache(true);
     try {
@@ -350,14 +335,12 @@ describe("typed classification per reason code", () => {
       const error = events.find((e) => e.type === "error");
       if (!error || error.type !== "error") throw new Error("expected a terminal error event");
 
-      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(mockFetch).toHaveBeenCalledOnce();
       expect(kiroDiagnostic(error.error)?.details).toMatchObject({
-        status: 400,
-        providerAttempts: { credentialRefresh: 2, capacity: 0 },
+        status: 403,
+        providerAttempts: { credentialRefresh: 1, capacity: 0 },
       });
-      // The message stays the plain generic form — the retry accounting is
-      // only ever on the type, never in the text.
-      expect(error.error.errorMessage).toBe("Kiro API error: 400 Bad Request Invalid parameter: modelId");
+      expect(error.error.errorMessage).toBe("Kiro API error: 403 Forbidden Access denied");
     } finally {
       vi.unstubAllGlobals();
     }
