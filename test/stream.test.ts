@@ -540,7 +540,6 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-
   it("uses a newer Pi-host token when initial profile discovery returns 403", async () => {
     resetProfileArnCache(false);
     const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
@@ -3476,7 +3475,6 @@ describe("Feature 9: Streaming Integration", () => {
 
     vi.unstubAllGlobals();
   });
-
 
   it("refreshes rejected Pi credentials and retries runtime without consulting kiro-cli", async () => {
     resetProfileArnCache(false);
