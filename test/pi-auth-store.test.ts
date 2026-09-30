@@ -45,7 +45,6 @@ describe("getPiHostKiroCredentials", () => {
     expect(getPiHostKiroCredentials(agentDir)).toBeUndefined();
   });
 
-
   it("can read an expired credential for forced refresh", () => {
     writeAuth({
       kiro: {
