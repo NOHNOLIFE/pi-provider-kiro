@@ -2,7 +2,6 @@ import { rmSync } from "node:fs";
 import type { ProviderModelsStore } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getKiroCliCredentials } from "../src/kiro-cli.js";
 import { getCachedModels, KIRO_MANAGEMENT_CACHE_PATH, type KiroModel, kiroModels } from "../src/models.js";
 
 const credentialMocks = vi.hoisted(() => ({
@@ -178,7 +177,6 @@ describe("Feature 1: Extension Registration", () => {
     expect(fetchMock.mock.calls[0][1].headers["X-Amz-Target"]).toBe("AmazonCodeWhispererService.GetProfile");
     expect(getCachedModels("us-east-1").map((model: KiroModel) => model.id)).toEqual(["claude-sonnet-4-6"]);
   });
-
 
   it("prefers Kiro IDE credentials over kiro-cli for bootstrap discovery", async () => {
     credentialMocks.ide.mockReturnValue({
