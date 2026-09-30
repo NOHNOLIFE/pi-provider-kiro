@@ -52,7 +52,7 @@ import {
 } from "./management.js";
 import { resolveKiroModel } from "./models.js";
 import { kiroAuthHeaders, refreshKiroToken } from "./oauth.js";
-import { getPiHostKiroCredentials } from "./pi-auth-store.js";
+import { getPiHostKiroCredentialsAllowExpired } from "./pi-auth-store.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -596,7 +596,7 @@ function streamKiroWithUsageTracking(
         // A 403 can arrive before the host considers the token expired, so
         // ensureFresh() may legitimately be a no-op. Force-refresh Pi's own
         // persisted credential in that case. Never consult IDE/CLI here.
-        const persisted = getPiHostKiroCredentials();
+        const persisted = getPiHostKiroCredentialsAllowExpired();
         if (!persisted || persisted.access !== rejectedToken) {
           refreshTrace.push(`${label}: no matching Pi credential to force-refresh`);
           return undefined;
