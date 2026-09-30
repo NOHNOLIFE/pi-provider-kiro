@@ -75,11 +75,16 @@ type KiroRefreshCredential = KiroRefreshModelsContext["credential"];
  * Local credential discovery. Every source is a file or environment read, so this
  * stays callable from the synchronous registration path.
  */
+function getBootstrapCredentials(): KiroCredentials | undefined {
+  return getKiroIdeCredentials() ?? getKiroCliSocialToken() ?? getKiroCliCredentials() ?? undefined;
+}
+
 function resolveLocalCredential(): KiroRefreshCredential {
   const apiKey = process.env.KIRO_API_KEY;
   if (apiKey) return { type: "api_key", key: apiKey };
   try {
-    return getKiroCliSocialToken() ?? getKiroCliCredentials() ?? getKiroIdeCredentials() ?? undefined;
+    // Pi's persisted credential is authoritative after the one-time IDE/CLI import.
+    return getPiHostKiroCredentials() ?? getBootstrapCredentials();
   } catch (error) {
     console.warn(`[pi-provider-kiro] Failed to read local Kiro credentials: ${formatSafeError(error)}`);
     return undefined;
@@ -199,7 +204,8 @@ export default function (pi: ExtensionAPI) {
       login: loginKiro,
       refreshToken: refreshKiroToken,
       getApiKey: (cred: OAuthCredentials) => cred.access,
-      getCliCredentials: getKiroCliCredentials,
+      // Host bootstrap hook: prefer Kiro IDE/KAM, keep CLI only as a fallback importer.
+      getCliCredentials: getBootstrapCredentials,
       modifyModels: (models: Model<Api>[], cred: OAuthCredentials) => {
         const apiRegion = resolveApiRegion((cred as KiroCredentials).region);
         const cachedKiro = getCachedModels(apiRegion);

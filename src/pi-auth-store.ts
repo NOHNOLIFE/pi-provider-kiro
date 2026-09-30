@@ -16,7 +16,7 @@ const EXPIRY_BUFFER_MS = 2 * 60 * 1000;
  * expired. Never logs file contents because auth.json holds many providers'
  * secrets.
  */
-export function getPiHostKiroCredentials(agentDir = getPiAgentDir()): KiroCredentials | undefined {
+function readPiHostKiroCredentials(agentDir: string, allowExpired: boolean): KiroCredentials | undefined {
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf-8"));
@@ -26,12 +26,26 @@ export function getPiHostKiroCredentials(agentDir = getPiAgentDir()): KiroCreden
 
   const kiro = asRecord(asRecord(raw)?.kiro);
   if (!kiro || typeof kiro.access !== "string" || !kiro.access) return undefined;
+  if (allowExpired && (typeof kiro.refresh !== "string" || !kiro.refresh)) return undefined;
 
-  if (typeof kiro.expires === "number" && Number.isFinite(kiro.expires)) {
+  if (!allowExpired && typeof kiro.expires === "number" && Number.isFinite(kiro.expires)) {
     if (Date.now() >= kiro.expires - EXPIRY_BUFFER_MS) return undefined;
   }
 
   return kiro as unknown as KiroCredentials;
+}
+
+export function getPiHostKiroCredentials(agentDir = getPiAgentDir()): KiroCredentials | undefined {
+  return readPiHostKiroCredentials(agentDir, false);
+}
+
+/**
+ * Read Pi's Kiro credential even after access-token expiry, provided the
+ * refresh token is still present. Used only for forced refresh after an auth
+ * rejection; runtime requests should use getPiHostKiroCredentials().
+ */
+export function getPiHostKiroCredentialsAllowExpired(agentDir = getPiAgentDir()): KiroCredentials | undefined {
+  return readPiHostKiroCredentials(agentDir, true);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

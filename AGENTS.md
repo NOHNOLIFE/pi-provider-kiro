@@ -57,9 +57,13 @@ On 413/too-large: error propagated immediately to the caller (no retry). The cal
 
 HTTP 429 is provider-retried only when its JSON `reason` is exactly `USER_REQUEST_RATE_EXCEEDED`; server wait hints and the 10-second fallback/cap are owned by `src/retry.ts`. Other generic 429/5xx responses remain owned by Pi's outer retry layer.
 
-### Credential Cascade
-1. kiro-cli SQLite DB — checks social token first (`kirocli:social:token`), then IDC token, then external IdP token (`kirocli:external-idp:token`)
-2. OAuth device code flow (interactive, opens browser)
+### Credential Ownership / Cascade
+1. Pi's persisted Kiro credential (`~/.pi/agent/auth.json`) is authoritative at runtime.
+2. Kiro IDE cache (`~/.aws/sso/cache/kiro-auth-token.json`) is the preferred one-time bootstrap source, including KAM-injected accounts.
+3. kiro-cli SQLite is a bootstrap fallback only.
+4. Interactive OAuth remains available for supported login methods.
+
+After bootstrap, refresh-token rotation must stay Pi-owned. Runtime refresh/403 recovery must not replace the Pi credential with IDE/CLI state.
 
 ### Auth Methods
 - `idc`: AWS Builder ID or IAM Identity Center (SSO). Refresh via SSO OIDC endpoint. Token format: `refreshToken|clientId|clientSecret|idc`. Preferred — has clientId/clientSecret for refresh.
@@ -100,7 +104,7 @@ npm run test:watch # vitest (watch mode)
 
 - `ZERO_COST` is a frozen shared object — don't try to mutate model costs
 - The `as any` cast in `index.ts` is intentional — `ProviderConfig.oauth` doesn't type `getCliCredentials`
-- `kiro-cli.ts` uses `sqlite3` CLI via `execSync`, not a Node native module
+- `kiro-cli.ts` is bootstrap compatibility only; runtime token rotation must not depend on it
 - Output token count is estimated (`content.length / 4`), not from the API
 - `contextUsagePercentage` is the only usage metric Kiro provides; input tokens are back-calculated
 - Social login (Google/GitHub) requires `kiro-cli` to be installed — pi delegates the auth flow to it

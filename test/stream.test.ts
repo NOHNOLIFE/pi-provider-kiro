@@ -540,17 +540,14 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("uses a newer kiro-cli token when initial profile discovery returns 403", async () => {
+
+  it("uses a newer Pi-host token when initial profile discovery returns 403", async () => {
     resetProfileArnCache(false);
     const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
     const mockFetch = vi
       .fn()
-      // Primary (us-east-1): stale token rejected
       .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
-      // Fallback (eu-central-1): stale token rejected there too — genuine auth rejection,
-      // so the probe rethrows 403 and the #107 newer-credential path engages
       .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
-      // Re-probe with the newer kiro-cli token: profile found
       .mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ profiles: [{ arn: freshProfileArn }] }),
@@ -572,90 +569,45 @@ describe("Feature 9: Streaming Integration", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const kiroCliModule = await import("../src/kiro-cli.js");
-    const freshCliCreds = {
-      refresh: "fresh-refresh|client|secret|idc",
-      access: "fresh-token",
-      expires: Date.now() + 3_600_000,
-      clientId: "client",
-      clientSecret: "secret",
-      region: "us-east-1",
-      authMethod: "idc" as const,
+    let token = "stale-token";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+      set: vi.fn(),
     };
-    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(freshCliCreds);
-    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(undefined);
 
-    const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" }));
+    const events = await collect(
+      streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
+    );
 
-    expect(refreshSpy).not.toHaveBeenCalled();
     expect(mockFetch).toHaveBeenCalledTimes(4);
     expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
     expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[1][0]).toBe("https://management.eu-central-1.kiro.dev/List-Available-Profiles");
     expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
     expect(mockFetch.mock.calls[3][1].headers.Authorization).toBe("Bearer fresh-token");
-    expect(JSON.parse(mockFetch.mock.calls[3][1].body).profileArn).toBe(freshProfileArn);
     expect(events.find((event) => event.type === "done")).toBeDefined();
-
-    getCredsSpy.mockRestore();
-    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
-  it("forces a kiro-cli refresh when profile discovery rejects the stored token", async () => {
+  it("fails profile discovery cleanly when no Pi-owned refresh path is available", async () => {
     resetProfileArnCache(false);
-    const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/REFRESHED";
     const mockFetch = vi
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
-      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" })
-      .mockResolvedValueOnce({
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: vi
-              .fn()
-              .mockResolvedValueOnce({
-                done: false,
-                value: encodeBody('{"content":"recovered"}{"contextUsagePercentage":5}'),
-              })
-              .mockResolvedValueOnce({ done: true, value: undefined }),
-            releaseLock: () => {},
-          }),
-        },
-      });
+      .mockResolvedValueOnce({ ok: false, status: 403, statusText: "Forbidden" });
     vi.stubGlobal("fetch", mockFetch);
-
-    const kiroCliModule = await import("../src/kiro-cli.js");
-    const staleCliCreds = {
-      refresh: "stale-refresh|client|secret|idc",
-      access: "stale-token",
-      expires: Date.now() + 3_600_000,
-      clientId: "client",
-      clientSecret: "secret",
-      region: "us-east-1",
-      authMethod: "idc" as const,
-    };
-    const freshCliCreds = { ...staleCliCreds, access: "fresh-token", profileArn: freshProfileArn };
-    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(staleCliCreds);
-    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(freshCliCreds);
 
     const events = await collect(streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" }));
 
-    expect(refreshSpy).toHaveBeenCalledOnce();
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
-    expect(JSON.parse(mockFetch.mock.calls[2][1].body).profileArn).toBe(freshProfileArn);
-    expect(events.find((event) => event.type === "done")).toBeDefined();
-
-    getCredsSpy.mockRestore();
-    refreshSpy.mockRestore();
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const error = events.find((event) => event.type === "error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
     vi.unstubAllGlobals();
   });
-
   it("uses a credential-projected profileArn without management discovery or a matching CLI token", async () => {
     resetProfileArnCache(false);
     const profileArn = "arn:aws:codewhisperer:us-east-1:123:profile/SOCIAL";
@@ -3525,26 +3477,23 @@ describe("Feature 9: Streaming Integration", () => {
     vi.unstubAllGlobals();
   });
 
-  it("refreshes rejected CLI credentials and re-resolves the profile before retrying runtime", async () => {
+
+  it("refreshes rejected Pi credentials and retries runtime without consulting kiro-cli", async () => {
     resetProfileArnCache(false);
-    const staleProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/STALE";
-    const freshProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
+    const profileArn = "arn:aws:codewhisperer:us-east-1:123:profile/FRESH";
     const successFrames = encodeBody('{"content":"ok"}{"contextUsagePercentage":5}');
     const mockFetch = vi
       .fn()
-      // Runtime rejects the token and profile projected from the original credentials.
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ profiles: [{ arn: profileArn }] }),
+      })
       .mockResolvedValueOnce({
         ok: false,
         status: 403,
         statusText: "Forbidden",
         text: () => Promise.resolve("Access denied"),
       })
-      // The fresh token resolves a fresh profile through management.
-      .mockResolvedValueOnce({
-        ok: true,
-        json: () => Promise.resolve({ profiles: [{ arn: freshProfileArn }] }),
-      })
-      // Runtime succeeds with both refreshed identity values.
       .mockResolvedValueOnce({
         ok: true,
         body: {
@@ -3559,51 +3508,29 @@ describe("Feature 9: Streaming Integration", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const kiroCliModule = await import("../src/kiro-cli.js");
-    const staleCliCreds = {
-      refresh: "stale-refresh|client|secret|idc",
-      access: "stale-token",
-      expires: Date.now() + 3_600_000,
-      clientId: "client",
-      clientSecret: "secret",
-      region: "us-east-1",
-      authMethod: "idc" as const,
-      profileArn: staleProfileArn,
+    let token = "stale-token";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+      set: vi.fn(),
     };
-    const freshCliCreds = {
-      ...staleCliCreds,
-      refresh: "fresh-refresh|client|secret|idc",
-      access: "fresh-token",
-      profileArn: undefined,
-    };
-    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(staleCliCreds);
-    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(freshCliCreds);
 
-    const stream = streamKiro(makeModel({ kiroProfileArn: staleProfileArn }), makeContext(), {
-      apiKey: "stale-token",
-    });
-    const events = await collect(stream);
+    const events = await collect(
+      streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
+    );
 
-    expect(refreshSpy).toHaveBeenCalledOnce();
     expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
-      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
-      "https://management.us-east-1.kiro.dev/List-Available-Profiles",
-      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
-    ]);
-    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    expect(JSON.parse(mockFetch.mock.calls[0][1].body).profileArn).toBe(staleProfileArn);
-    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-token");
+    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
     expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-token");
-    expect(JSON.parse(mockFetch.mock.calls[2][1].body).profileArn).toBe(freshProfileArn);
     expect(events.find((event) => event.type === "done")).toBeDefined();
-
-    getCredsSpy.mockRestore();
-    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
-  it("preserves a known social profile across desktop credential rotation", async () => {
+  it("preserves a known social profile across Pi-owned desktop token rotation", async () => {
     resetProfileArnCache(false);
     const socialProfileArn = "arn:aws:codewhisperer:us-east-1:123:profile/SOCIAL";
     const successFrames = encodeBody('{"content":"ok"}{"contextUsagePercentage":5}');
@@ -3629,103 +3556,63 @@ describe("Feature 9: Streaming Integration", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const kiroCliModule = await import("../src/kiro-cli.js");
-    const staleSocialCreds = {
-      refresh: "stale-social-refresh|desktop",
-      access: "stale-social-token",
-      expires: Date.now() + 3_600_000,
-      clientId: "",
-      clientSecret: "",
-      region: "us-east-1",
-      authMethod: "desktop" as const,
-      profileArn: socialProfileArn,
+    let token = "stale-social-token";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-social-token";
+      }),
+      set: vi.fn(),
     };
-    const refreshedSocialCreds = {
-      ...staleSocialCreds,
-      refresh: "fresh-social-refresh|desktop",
-      access: "fresh-social-token",
-      profileArn: undefined,
-    };
-    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(staleSocialCreds);
-    const refreshSpy = vi.spyOn(kiroCliModule, "refreshViaKiroCli").mockReturnValue(refreshedSocialCreds);
 
     const events = await collect(
       streamKiro(makeModel({ kiroProfileArn: socialProfileArn }), makeContext(), {
         apiKey: "stale-social-token",
+        credentialAccessor: accessor,
       }),
     );
 
-    expect(refreshSpy).toHaveBeenCalledOnce();
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockFetch.mock.calls.map(([url]) => url)).toEqual([
-      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
-      "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
-    ]);
     expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-social-token");
     expect(JSON.parse(mockFetch.mock.calls[1][1].body).profileArn).toBe(socialProfileArn);
     expect(events.find((event) => event.type === "done")).toBeDefined();
-
-    getCredsSpy.mockRestore();
-    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
-  it("fails the 403 retry when refreshed profile discovery fails", async () => {
-    // Start with unresolved cache so profileArn resolution runs
+  it("fails the runtime 403 retry when the Pi-host refresh cannot produce a new token", async () => {
     resetProfileArnCache(false);
     const mockFetch = vi
       .fn()
-      // 1st call: ListAvailableProfiles
       .mockResolvedValueOnce({
         ok: true,
         json: () => Promise.resolve({ profiles: [{ arn: "arn:aws:codewhisperer:us-east-1:123:profile/TEST" }] }),
       })
-      // 2nd call: generateAssistantResponse → 403
       .mockResolvedValueOnce({
         ok: false,
         status: 403,
         statusText: "Forbidden",
         text: () => Promise.resolve('{"message":"The bearer token included in the request is invalid."}'),
-      })
-      // 3rd call: ListAvailableProfiles fails after credential refresh
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 503,
-        statusText: "Service Unavailable",
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    // Mock kiro-cli to return a fresh token
-    const kiroCliModule = await import("../src/kiro-cli.js");
-    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue({
-      refresh: "fresh-refresh|client|secret|idc",
-      access: "fresh-access-token",
-      expires: Date.now() + 3600000,
-      clientId: "client",
-      clientSecret: "secret",
-      region: "us-east-1",
-      authMethod: "idc",
-    });
+    const accessor = {
+      get: vi.fn(() => "stale-token"),
+      ensureFresh: vi.fn(async () => {}),
+      set: vi.fn(),
+    };
 
-    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "stale-token" });
-    const events = await collect(stream);
+    const events = await collect(
+      streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
+    );
 
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    // 1st: ListAvailableProfiles with stale token on management.
-    expect(mockFetch.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
-    // 2nd: generateAssistantResponse with stale token → 403
-    expect(mockFetch.mock.calls[1][1].headers.Authorization).toBe("Bearer stale-token");
-    // 3rd: ListAvailableProfiles fails with the fresh token on management.
-    expect(mockFetch.mock.calls[2][0]).toBe("https://management.us-east-1.kiro.dev/List-Available-Profiles");
-    expect(mockFetch.mock.calls[2][1].headers.Authorization).toBe("Bearer fresh-access-token");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
     const error = events.find((event) => event.type === "error");
-    expect(error?.type === "error" && error.error.errorMessage).toContain("ListAvailableProfiles failed");
-
-    getCredsSpy.mockRestore();
+    expect(error?.type === "error" && error.error.errorMessage).toContain("Kiro API error");
+    expect(error?.type === "error" && error.error.errorMessage).toContain("[auth-refresh]");
     vi.unstubAllGlobals();
   });
-
   it("does not retry repeated 429 responses inside the provider", async () => {
     vi.useFakeTimers();
     const originalTimeout = retryConfig.requestHeaderTimeoutMs;

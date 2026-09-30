@@ -7,7 +7,7 @@ A [pi](https://shittycodingagent.ai/) provider extension that connects pi to the
 Kiro gives you a strong free model menu, but pi needs a provider that speaks Kiro's auth, model catalog, and streaming protocol cleanly. `pi-provider-kiro` handles that bridge, including:
 
 - AWS Builder ID, IAM Identity Center, Google, GitHub, and enterprise external IdP (OIDC) login flows
-- shared credentials from an existing `kiro-cli` session when available
+- IDE-first credential bootstrap (including credentials injected by Kiro Account Manager), with `kiro-cli` only as a fallback importer
 - reasoning-aware streaming
 - region-aware model filtering so pi only shows models your Kiro region can actually use
 
@@ -37,10 +37,24 @@ The login flow supports:
 - **Google** — social login via `kiro-cli`
 - **GitHub** — social login via `kiro-cli`
 
-If your organization uses an external identity provider (e.g. Okta) through Kiro, log in once with
-`kiro-cli login` and the provider reuses that session — no separate pi login needed.
+### KAM / Kiro IDE bootstrap
 
-If you already use [kiro-cli](https://kiro.dev), the provider can reuse those credentials instead of forcing a second login.
+If your account is supplied as JSON by Kiro Account Manager (KAM), switch/inject that account into **Kiro IDE** first, then run:
+
+```text
+/login kiro
+```
+
+Choose **Use existing credentials**. The provider prefers `~/.aws/sso/cache/kiro-auth-token.json` over kiro-cli and imports both Kiro IDE credential families correctly:
+
+- `authMethod: "social"` (Google/GitHub) → Kiro desktop refresh endpoint
+- `authMethod: "IdC"` (Builder ID / IAM Identity Center) → AWS OIDC refresh endpoint using the companion `{clientIdHash}.json`
+
+After that import, **Pi's `~/.pi/agent/auth.json` is authoritative**. Refresh-token rotation is owned by Pi and runtime 403 recovery no longer reads or refreshes kiro-cli/IDE credentials.
+
+Because these refresh tokens can rotate, do not keep KAM/Kiro IDE actively refreshing the same imported account in parallel with Pi. Use KAM/IDE again only when you intentionally want to bootstrap/switch Pi to another account.
+
+If IDE credentials are unavailable, the provider still keeps the existing kiro-cli credential path as a bootstrap fallback.
 
 ## Models
 
@@ -116,7 +130,7 @@ The badge shows the percent of your allowance **used** (e.g. `◆ Kiro 1%`), col
 Generic transient retries such as HTTP `429` and `5xx` are handled by `pi-coding-agent` at the session layer.
 
 This provider only keeps local recovery for Kiro-specific cases:
-- `403` auth races, where it can refresh credentials from `kiro-cli`
+- `403` auth races, where it refreshes Pi's persisted Kiro credential without consulting IDE/kiro-cli
 - first-token / stalled-stream recovery
 - empty-stream retries
 - non-retryable Kiro body markers like `MONTHLY_REQUEST_COUNT` and `INSUFFICIENT_MODEL_CAPACITY`

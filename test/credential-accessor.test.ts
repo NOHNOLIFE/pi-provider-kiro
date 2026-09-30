@@ -179,70 +179,63 @@ describe("streamKiro credential accessor", () => {
     vi.unstubAllGlobals();
   });
 
-  it("writes the refreshed credential back through accessor.set() exactly once on a runtime 403", async () => {
+
+  it("retries a runtime 403 with the token rotated by the Pi host", async () => {
     const fetch = mockFetch403ThenOk(1);
     vi.stubGlobal("fetch", fetch);
 
-    const kiroCli = await import("../src/kiro-cli.js");
-    // Store still holds the rejected token → provider must force a refresh.
-    const getSpy = vi.spyOn(kiroCli, "getKiroCliCredentials").mockReturnValue(idcCreds("stale-token"));
-    const fresh = idcCreds("fresh-token");
-    const refreshSpy = vi.spyOn(kiroCli, "refreshViaKiroCli").mockReturnValue(fresh);
+    let token = "stale-token";
+    let refreshCalls = 0;
+    const accessor = {
+      get: vi.fn(() => token),
+      set: vi.fn(),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        // First call is the proactive preflight; the second is the reactive 403 refresh.
+        if (refreshCalls >= 2) token = "fresh-token";
+      }),
+    };
 
-    const accessor = { get: vi.fn(() => "stale-token"), set: vi.fn() };
     const events = await collect(
       streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
     );
 
-    expect(refreshSpy).toHaveBeenCalledOnce();
-    expect(accessor.set).toHaveBeenCalledOnce();
-    expect(accessor.set.mock.calls[0][0]).toMatchObject({ access: "fresh-token" });
-    // Retry used the fresh token.
+    expect(accessor.ensureFresh).toHaveBeenCalledTimes(2);
+    expect(accessor.set).not.toHaveBeenCalled();
     expect(fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer stale-token");
     expect(fetch.mock.calls[1][1].headers.Authorization).toBe("Bearer fresh-token");
     expect(events.find((e) => e.type === "done")).toBeDefined();
-
-    getSpy.mockRestore();
-    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
-  it("does NOT write back when the refreshed token is identical (entitlement 403 negative control)", async () => {
-    // Runtime 403 whose refresh yields the SAME token: a valid credential lacking
-    // model access. Write-back must not fire — the token did not change.
+  it("does not retry an entitlement-style 403 when the Pi host token stays unchanged", async () => {
     const fetch = mockFetch403Always();
     vi.stubGlobal("fetch", fetch);
 
-    const kiroCli = await import("../src/kiro-cli.js");
-    const same = idcCreds("valid-token");
-    const getSpy = vi.spyOn(kiroCli, "getKiroCliCredentials").mockReturnValue(same);
-    const refreshSpy = vi.spyOn(kiroCli, "refreshViaKiroCli").mockReturnValue(same);
-
-    const accessor = { get: vi.fn(() => "valid-token"), set: vi.fn() };
+    const accessor = {
+      get: vi.fn(() => "valid-token"),
+      set: vi.fn(),
+      ensureFresh: vi.fn(async () => {}),
+    };
     const events = await collect(
       streamKiro(makeModel(), makeContext(), { apiKey: "valid-token", credentialAccessor: accessor }),
     );
 
     expect(accessor.set).not.toHaveBeenCalled();
-    const error = events.find((e) => e.type === "error");
-    expect(error).toBeDefined();
-
-    getSpy.mockRestore();
-    refreshSpy.mockRestore();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(events.find((e) => e.type === "error")).toBeDefined();
     vi.unstubAllGlobals();
   });
 
-  it("surfaces the refresh trace on a terminal auth error", async () => {
+  it("surfaces the Pi-owned refresh trace on a terminal auth error", async () => {
     const fetch = mockFetch403Always();
     vi.stubGlobal("fetch", fetch);
 
-    const kiroCli = await import("../src/kiro-cli.js");
-    // Store keeps returning the rejected token → every retry forces a refresh
-    // that yields nothing usable.
-    const getSpy = vi.spyOn(kiroCli, "getKiroCliCredentials").mockReturnValue(idcCreds("stale-token"));
-    const refreshSpy = vi.spyOn(kiroCli, "refreshViaKiroCli").mockReturnValue(undefined);
-
-    const accessor = { get: vi.fn(() => "stale-token"), set: vi.fn() };
+    const accessor = {
+      get: vi.fn(() => "stale-token"),
+      set: vi.fn(),
+      ensureFresh: vi.fn(async () => {}),
+    };
     const events = await collect(
       streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
     );
@@ -250,44 +243,37 @@ describe("streamKiro credential accessor", () => {
     const error = events.find((e) => e.type === "error");
     expect(error).toBeDefined();
     const msg = error?.type === "error" ? (error.error.errorMessage ?? "") : "";
-    // First line preserves the original error grammar for the auth-expiry marker.
     expect(msg.split("\n")[0]).toContain("Kiro API error");
-    // Trace line makes the failure decidable.
     expect(msg).toContain("[auth-refresh]");
     expect(msg).toContain("runtime-403");
-
-    getSpy.mockRestore();
-    refreshSpy.mockRestore();
+    expect(msg).not.toContain("kiro-cli");
     vi.unstubAllGlobals();
   });
 
-  it("never fails a turn when accessor.set() throws", async () => {
+  it("does not require accessor.set when the host itself rotates the credential", async () => {
     const fetch = mockFetch403ThenOk(1);
     vi.stubGlobal("fetch", fetch);
 
-    const kiroCli = await import("../src/kiro-cli.js");
-    const getSpy = vi.spyOn(kiroCli, "getKiroCliCredentials").mockReturnValue(idcCreds("stale-token"));
-    const refreshSpy = vi.spyOn(kiroCli, "refreshViaKiroCli").mockReturnValue(idcCreds("fresh-token"));
-
+    let token = "stale-token";
+    let refreshCalls = 0;
     const accessor = {
-      get: vi.fn(() => "stale-token"),
+      get: vi.fn(() => token),
       set: vi.fn(() => {
         throw new Error("persist failed");
+      }),
+      ensureFresh: vi.fn(async () => {
+        refreshCalls++;
+        if (refreshCalls >= 2) token = "fresh-token";
       }),
     };
     const events = await collect(
       streamKiro(makeModel(), makeContext(), { apiKey: "stale-token", credentialAccessor: accessor }),
     );
 
-    // The throw in set() is swallowed; the turn still recovers.
-    expect(accessor.set).toHaveBeenCalled();
+    expect(accessor.set).not.toHaveBeenCalled();
     expect(events.find((e) => e.type === "done")).toBeDefined();
-
-    getSpy.mockRestore();
-    refreshSpy.mockRestore();
     vi.unstubAllGlobals();
   });
-
   it("awaits accessor.ensureFresh() before reading the token and before the first fetch", async () => {
     const order: string[] = [];
     const fetch = vi.fn(async (..._args: unknown[]) => {

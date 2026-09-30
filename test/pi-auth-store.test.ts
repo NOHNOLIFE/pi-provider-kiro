@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getPiHostKiroCredentials } from "../src/pi-auth-store.js";
+import { getPiHostKiroCredentials, getPiHostKiroCredentialsAllowExpired } from "../src/pi-auth-store.js";
 
 describe("getPiHostKiroCredentials", () => {
   let agentDir: string;
@@ -43,6 +43,24 @@ describe("getPiHostKiroCredentials", () => {
   it("returns undefined when the access token is expired", () => {
     writeAuth({ kiro: { access: "tok", refresh: "r", expires: Date.now() - 1000, region: "us-east-1" } });
     expect(getPiHostKiroCredentials(agentDir)).toBeUndefined();
+  });
+
+
+  it("can read an expired credential for forced refresh", () => {
+    writeAuth({
+      kiro: {
+        access: "expired",
+        refresh: "refresh-token|desktop",
+        expires: Date.now() - 1000,
+        region: "us-east-1",
+        authMethod: "desktop",
+      },
+    });
+    expect(getPiHostKiroCredentials(agentDir)).toBeUndefined();
+    expect(getPiHostKiroCredentialsAllowExpired(agentDir)).toMatchObject({
+      access: "expired",
+      refresh: "refresh-token|desktop",
+    });
   });
 
   it("accepts a credential with no expiry field", () => {

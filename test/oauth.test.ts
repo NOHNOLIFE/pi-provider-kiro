@@ -204,7 +204,8 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
 
-    it("uses expired kiro-cli creds as fallback when direct refresh fails", async () => {
+
+    it("never substitutes an expired kiro-cli credential when Pi-owned refresh fails", async () => {
       const { getKiroCliCredentialsAllowExpired } = await import("../src/kiro-cli.js");
       vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
         refresh: "cli_rt|cli_cid|cli_csec|idc",
@@ -216,50 +217,31 @@ describe("Feature 3: OAuth — Token Refresh", () => {
         authMethod: "idc",
       });
 
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: false, status: 401 })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: () => Promise.resolve({ accessToken: "new_at", refreshToken: "new_rt", expiresIn: 3600 }),
-        });
-      vi.stubGlobal("fetch", mockFetch);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce({ ok: false, status: 401 }));
 
-      const creds = await refreshKiroToken({ refresh: "stale_rt|cid|csec|idc", access: "stale_at", expires: 0 });
-      expect(creds.access).toBe("new_at");
+      await expect(
+        refreshKiroToken({ refresh: "stale_rt|cid|csec|idc", access: "stale_at", expires: 0 }),
+      ).rejects.toThrow("Token refresh failed: 401");
+      expect(getKiroCliCredentialsAllowExpired).not.toHaveBeenCalled();
       vi.unstubAllGlobals();
     });
 
-    it("falls through to graceful degradation when expired creds refresh also fails", async () => {
-      const { getKiroCliCredentialsAllowExpired } = await import("../src/kiro-cli.js");
-      vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
-        refresh: "cli_rt|cli_cid|cli_csec|idc",
-        access: "cli_at",
-        expires: Date.now() - 1000,
-        clientId: "cli_cid",
-        clientSecret: "cli_csec",
-        region: "us-east-1",
-        authMethod: "idc",
-      });
-
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: false, status: 401 })
-        .mockResolvedValueOnce({ ok: false, status: 401 });
-      vi.stubGlobal("fetch", mockFetch);
+    it("uses only the buffered lifetime of the same Pi credential when refresh temporarily fails", async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 401 });
+      vi.stubGlobal("fetch", fetchMock);
 
       const creds = await refreshKiroToken({
         refresh: "old_rt|cid|csec|idc",
         access: "old_at",
         expires: Date.now() - 60_000,
       });
+
       expect(creds.access).toBe("old_at");
+      expect(creds.refresh).toBe("old_rt|cid|csec|idc");
       expect(creds.expires).toBeGreaterThan(Date.now());
+      expect(fetchMock).toHaveBeenCalledOnce();
       vi.unstubAllGlobals();
     });
-  });
-
-  describe("loginKiroWithApiKey", () => {
     it("validates Kiro API key format", async () => {
       const { loginKiroWithApiKey } = await import("../src/oauth.js");
       await expect(loginKiroWithApiKey({} as any, "invalid_key")).rejects.toThrow("Invalid API key format");
@@ -284,7 +266,8 @@ describe("Feature 3: OAuth — Token Refresh", () => {
     });
   });
 
-  it("does not replace desktop credentials with an unrelated IDE IDC account", async () => {
+
+  it("does not replace a Pi-owned desktop credential with IDE or CLI credentials during refresh", async () => {
     vi.mocked(getKiroIdeCredentials).mockReturnValueOnce({
       refresh: "ide_rt|ide_cid|ide_csec|idc",
       access: "ide_at",
@@ -305,6 +288,17 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/social",
     });
 
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          accessToken: "pi_refreshed_at",
+          refreshToken: "pi_refreshed_rt",
+          expiresIn: 3600,
+        }),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
     const creds = (await refreshKiroToken({
       refresh: "stored_rt|desktop",
       access: "stored_at",
@@ -315,8 +309,10 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       authMethod: "desktop",
     } as KiroCredentials)) as KiroCredentials;
 
-    expect(creds.access).toBe("social_at");
-    expect(creds.authMethod).toBe("desktop");
-    expect(creds.region).toBe("us-east-1");
+    expect(creds.access).toBe("pi_refreshed_at");
+    expect(creds.refresh).toBe("pi_refreshed_rt|desktop");
+    expect(getKiroIdeCredentials).not.toHaveBeenCalled();
+    expect(getKiroCliSocialToken).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

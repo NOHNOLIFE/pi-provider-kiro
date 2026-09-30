@@ -179,7 +179,19 @@ describe("Feature 1: Extension Registration", () => {
     expect(getCachedModels("us-east-1").map((model: KiroModel) => model.id)).toEqual(["claude-sonnet-4-6"]);
   });
 
-  it("checks kiro-cli social credentials before the general kiro-cli credential scan", async () => {
+
+  it("prefers Kiro IDE credentials over kiro-cli for bootstrap discovery", async () => {
+    credentialMocks.ide.mockReturnValue({
+      access: "ide-access",
+      refresh: "ide-refresh|desktop",
+      expires: Date.now() + 60_000,
+      region: "us-east-1",
+      authMethod: "desktop",
+      profileArn: "arn:ide",
+      clientId: "",
+      clientSecret: "",
+    });
+    credentialMocks.social.mockReturnValue(cliOauthCredential);
     credentialMocks.cli.mockReturnValue(cliOauthCredential);
     vi.stubGlobal(
       "fetch",
@@ -194,22 +206,14 @@ describe("Feature 1: Extension Registration", () => {
     mod.default(pi);
     await mod.whenStartupCatalogSettled();
 
-    expect(credentialMocks.social).toHaveBeenCalledOnce();
-    expect(credentialMocks.cli).toHaveBeenCalledOnce();
-    expect(credentialMocks.ide).not.toHaveBeenCalled();
+    expect(credentialMocks.ide).toHaveBeenCalledOnce();
+    expect(credentialMocks.social).not.toHaveBeenCalled();
+    expect(credentialMocks.cli).not.toHaveBeenCalled();
   });
 
-  it("uses Kiro IDE credentials only after both kiro-cli scans miss", async () => {
-    credentialMocks.ide.mockReturnValue({
-      access: "ide-access",
-      refresh: "ide-refresh|||idc",
-      expires: Date.now() + 60_000,
-      region: "us-east-1",
-      authMethod: "idc",
-      profileArn: "arn:ide",
-      clientId: "",
-      clientSecret: "",
-    });
+  it("falls back to kiro-cli only when the Kiro IDE bootstrap credential is absent", async () => {
+    credentialMocks.ide.mockReturnValue(undefined);
+    credentialMocks.social.mockReturnValue(cliOauthCredential);
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -223,12 +227,12 @@ describe("Feature 1: Extension Registration", () => {
     mod.default(pi);
     await mod.whenStartupCatalogSettled();
 
-    expect(credentialMocks.social).toHaveBeenCalledOnce();
-    expect(credentialMocks.cli).toHaveBeenCalledOnce();
     expect(credentialMocks.ide).toHaveBeenCalledOnce();
+    expect(credentialMocks.social).toHaveBeenCalledOnce();
+    expect(credentialMocks.cli).not.toHaveBeenCalled();
   });
 
-  it("preserves the existing OAuth and kiro-cli credential contract", async () => {
+  it("registers an IDE-first bootstrap credential hook", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();
     await mod.default(pi);
@@ -237,11 +241,24 @@ describe("Feature 1: Extension Registration", () => {
     expect(config.oauth.name).toBe("Kiro (Builder ID / Google / GitHub)");
     expect(typeof config.oauth.login).toBe("function");
     expect(typeof config.oauth.refreshToken).toBe("function");
-    expect(config.oauth.getCliCredentials).toBe(getKiroCliCredentials);
+    expect(typeof config.oauth.getCliCredentials).toBe("function");
     expect(config.oauth.getApiKey({ access: "existing-access-token" })).toBe("existing-access-token");
     expect(typeof config.oauth.fetchUsage).toBe("function");
-  });
 
+    credentialMocks.ide.mockReturnValue({
+      access: "ide-bootstrap",
+      refresh: "ide-refresh|desktop",
+      expires: Date.now() + 60_000,
+      region: "us-east-1",
+      authMethod: "desktop",
+      clientId: "",
+      clientSecret: "",
+    });
+    credentialMocks.social.mockReturnValue(cliOauthCredential);
+
+    expect(config.oauth.getCliCredentials().access).toBe("ide-bootstrap");
+    expect(credentialMocks.social).not.toHaveBeenCalled();
+  });
   it("registers a streamSimple handler", async () => {
     const mod = await import("../src/index.js");
     const { pi, registerProvider } = mockPi();

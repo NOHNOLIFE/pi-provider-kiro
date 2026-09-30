@@ -1,20 +1,14 @@
-// ABOUTME: Reads credentials written by the Kiro IDE.
-// ABOUTME: The IDE stores its auth token at ~/.aws/sso/cache/kiro-auth-token.json
-// ABOUTME: on all platforms (Windows, macOS, Linux) after every successful login,
-// ABOUTME: including IAM Identity Center (authMethod: "IdC") and Builder ID.
-// ABOUTME: A companion file, ~/.aws/sso/cache/{clientIdHash}.json, holds the
-// ABOUTME: OIDC clientId/clientSecret needed to silently refresh the access token
-// ABOUTME: via the standard AWS OIDC /token endpoint — no extra login flow needed.
+// ABOUTME: Reads credentials written by the Kiro IDE (including KAM-injected sessions).
+// ABOUTME: Treats the IDE cache as a bootstrap source only; Pi owns refresh-token rotation after import.
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { KiroCredentials } from "./oauth.js";
 
-// ~/.aws/sso/cache is the standard AWS SSO cache directory on all platforms.
-// Node's os.homedir() returns the correct home directory on Windows, macOS and Linux.
 const SSO_CACHE_DIR = join(homedir(), ".aws", "sso", "cache");
 const KIRO_IDE_TOKEN_PATH = join(SSO_CACHE_DIR, "kiro-auth-token.json");
+const EXPIRES_BUFFER_MS = 5 * 60 * 1000;
 
 interface KiroIdeTokenFile {
   accessToken: string;
@@ -24,6 +18,7 @@ interface KiroIdeTokenFile {
   clientIdHash?: string;
   authMethod?: string;
   provider?: string;
+  profileArn?: string;
 }
 
 interface KiroIdeClientFile {
@@ -32,64 +27,99 @@ interface KiroIdeClientFile {
   expiresAt?: string;
 }
 
+function isSocialIdeToken(tokenData: KiroIdeTokenFile): boolean {
+  const authMethod = tokenData.authMethod?.trim().toLowerCase();
+  const provider = tokenData.provider?.trim().toLowerCase();
+
+  if (authMethod === "social" || authMethod === "desktop") return true;
+  if (authMethod === "idc") return false;
+
+  if (provider === "google" || provider === "github") return true;
+  if (provider === "builderid" || provider === "builder-id" || provider === "enterprise") return false;
+
+  // Legacy social cache files may omit authMethod/provider. IdC sessions need
+  // clientIdHash so the IDE can locate the companion OIDC client registration.
+  return !tokenData.clientIdHash;
+}
+
+/**
+ * Convert Kiro IDE's on-disk token shape into the provider's OAuth shape.
+ *
+ * KAM writes the same two families as Kiro IDE:
+ * - social: authMethod="social", no clientIdHash, refreshes via Kiro desktop auth
+ * - IdC:    authMethod="IdC", clientIdHash + companion client registration
+ */
+export function parseKiroIdeCredentials(
+  tokenData: KiroIdeTokenFile,
+  clientData: KiroIdeClientFile | undefined,
+  allowExpired: boolean,
+): KiroCredentials | undefined {
+  if (!tokenData.accessToken || !tokenData.refreshToken || !tokenData.expiresAt) return undefined;
+
+  const realExpiresAt = new Date(tokenData.expiresAt).getTime();
+  if (!Number.isFinite(realExpiresAt)) return undefined;
+
+  const expires = realExpiresAt - EXPIRES_BUFFER_MS;
+  if (!allowExpired && Date.now() >= expires) return undefined;
+
+  const region = tokenData.region || "us-east-1";
+  if (isSocialIdeToken(tokenData)) {
+    return {
+      refresh: `${tokenData.refreshToken}|desktop`,
+      access: tokenData.accessToken,
+      expires,
+      clientId: "",
+      clientSecret: "",
+      region: "us-east-1",
+      authMethod: "desktop",
+      profileArn: tokenData.profileArn,
+    };
+  }
+
+  const clientId = clientData?.clientId ?? "";
+  const clientSecret = clientData?.clientSecret ?? "";
+  return {
+    refresh: `${tokenData.refreshToken}|${clientId}|${clientSecret}|idc`,
+    access: tokenData.accessToken,
+    expires,
+    clientId,
+    clientSecret,
+    region,
+    authMethod: "idc",
+    profileArn: tokenData.profileArn,
+  };
+}
+
 function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
   try {
     if (!existsSync(KIRO_IDE_TOKEN_PATH)) return undefined;
 
     const tokenData = JSON.parse(readFileSync(KIRO_IDE_TOKEN_PATH, "utf-8")) as KiroIdeTokenFile;
-    if (!tokenData.accessToken || !tokenData.refreshToken) return undefined;
+    let clientData: KiroIdeClientFile | undefined;
 
-    const expiresAt = new Date(tokenData.expiresAt).getTime();
-    if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
-
-    const region = tokenData.region ?? "us-east-1";
-
-    // Load the OIDC client registration so refreshKiroTokenDirect can call the
-    // AWS OIDC /token endpoint with a refresh_token grant without prompting the user.
-    let clientId = "";
-    let clientSecret = "";
     if (tokenData.clientIdHash) {
       const regPath = join(SSO_CACHE_DIR, `${tokenData.clientIdHash}.json`);
       if (existsSync(regPath)) {
         try {
-          const reg = JSON.parse(readFileSync(regPath, "utf-8")) as KiroIdeClientFile;
-          clientId = reg.clientId ?? "";
-          clientSecret = reg.clientSecret ?? "";
+          clientData = JSON.parse(readFileSync(regPath, "utf-8")) as KiroIdeClientFile;
         } catch {
-          // Ignore — we can still use the token without a refresh client
+          clientData = undefined;
         }
       }
     }
 
-    return {
-      // Pack into the same pipe-delimited format used by the rest of the refresh chain
-      refresh: `${tokenData.refreshToken}|${clientId}|${clientSecret}|idc`,
-      access: tokenData.accessToken,
-      // Subtract 2-min buffer so we refresh before the actual AWS expiry
-      expires: expiresAt - 2 * 60 * 1000,
-      clientId,
-      clientSecret,
-      region,
-      authMethod: "idc",
-    };
+    return parseKiroIdeCredentials(tokenData, clientData, allowExpired);
   } catch {
     return undefined;
   }
 }
 
-/**
- * Returns valid (non-expired) Kiro IDE credentials read from
- * ~/.aws/sso/cache/kiro-auth-token.json, or undefined if the IDE has not
- * logged in or the token has already expired.
- */
+/** Returns a usable Kiro IDE/KAM credential for one-time import into Pi. */
 export function getKiroIdeCredentials(): KiroCredentials | undefined {
   return readKiroIdeToken(false);
 }
 
-/**
- * Like getKiroIdeCredentials but also returns expired tokens so the caller can
- * attempt a silent OIDC refresh before falling back to the full login flow.
- */
+/** Returns the IDE/KAM credential even near/after expiry so Pi can refresh it once during import. */
 export function getKiroIdeCredentialsAllowExpired(): KiroCredentials | undefined {
   return readKiroIdeToken(true);
 }
