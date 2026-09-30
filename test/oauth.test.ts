@@ -204,7 +204,6 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
 
-
     it("never substitutes an expired kiro-cli credential when Pi-owned refresh fails", async () => {
       const { getKiroCliCredentialsAllowExpired } = await import("../src/kiro-cli.js");
       vi.mocked(getKiroCliCredentialsAllowExpired).mockReturnValueOnce({
@@ -265,7 +264,6 @@ describe("Feature 3: OAuth — Token Refresh", () => {
       vi.unstubAllGlobals();
     });
   });
-
 
   it("does not replace a Pi-owned desktop credential with IDE or CLI credentials during refresh", async () => {
     vi.mocked(getKiroIdeCredentials).mockReturnValueOnce({
